@@ -6,13 +6,8 @@ standalone Windows client that connects the running game to a multiworld room.
 
 Ninety-eight checks: two locations on each tower floor from 1 to 39, ten
 Equipment Shop slots, and ten Monster Shop slots. Eight progressive keycards
-open the successive five-floor bands. Claiming the Ultimate Egg on floor 40
+open the successive five-floor bands. Arriving on floor 40
 completes the goal.
-
-Rewards arrive natively. The client hands each item to the game rather than
-editing the save, so Koh plays his ordinary obtained-item animation and the
-item lands in his inventory through the game's own code. A full inventory or
-an unsafe moment simply defers the delivery until it is safe.
 
 **Setup is a one-time chore. After that, playing a new seed is one
 double-click.**
@@ -36,7 +31,8 @@ Screenshots and walkthroughs of the setup below get posted there too.
   raw BIN image. **Not included.** Supply your own copy.
 - [DuckStation](https://www.duckstation.org/), with **Export Shared Memory**
   enabled.
-- [Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases).
+- [Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases), 0.6.7
+  or newer. Older versions may not work.
 - Windows, for the client. Nothing else to install: it is a single
   self-contained executable, so no Python, .NET or patching tools are needed.
 
@@ -54,30 +50,39 @@ Each release is a **pair**: one `azure_dreams.apworld` and one
 > on a save-journal and mailbox layout that changes between versions, and a
 > mismatched pair will not synchronize correctly.
 
-1. **Install the apworld.** Double-click `azure_dreams.apworld`. The
+1. **Install Archipelago.** Get the latest release from
+   [ArchipelagoMW/Archipelago/releases](https://github.com/ArchipelagoMW/Archipelago/releases).
+   At the time of writing that is **0.6.7**; older versions may not work, so
+   install the newest one. Since this project's client is Windows-only, use the
+   Windows installer, `Setup.Archipelago.0.6.7.exe` (matching whatever the
+   current version number is), rather than the portable archive. The installer
+   is also what registers the `.apworld` file type, which the next step relies
+   on.
+2. **Install the apworld.** Double-click `azure_dreams.apworld`. The
    Archipelago Launcher opens and installs it into your `custom_worlds`
    folder. Restart Archipelago afterwards if it was already running.
-2. **Put the client somewhere sensible.** It is a single executable with
+3. **Put the client somewhere sensible.** It is a single executable with
    nothing beside it, so anywhere works, but do not leave it in your Downloads
    folder where you will lose it.
-3. **Turn on DuckStation's shared memory.** Enable
+4. **Turn on DuckStation's shared memory.** Enable
    **Settings > Advanced > Show Debug Menu**, then
    **Settings > Debugging > Export Shared Memory**. The client reads the
    running game through this, and nothing works without it.
-4. **Run the client once.** It asks whether to open `.adpatch` files with it.
+5. **Run the client once.** It asks whether to open `.adpatch` files with it.
    Say **Yes**. This is what turns every future seed into a double-click. It
    affects only your Windows account and only the `.adpatch` extension, and
    the client can undo it at any time.
-5. **Point it at your two files.** Click **Original ROM...** and choose your
-   clean, unmodified BIN. Click **DuckStation...** and choose your DuckStation
-   executable. Both paths are saved, and you should never need to touch them
-   again.
 6. **Make a player options file.** Click **Create YAML**, fill in your slot
    name and options, and save it into your Archipelago install's `Players`
    folder. Remember the slot name you chose, because you type it again when
    you connect.
+7. **Point it at your two files.** Click **Original ROM...** and choose your
+   clean, unmodified BIN. Click **DuckStation...** and choose your DuckStation
+   executable. Both paths are saved, and you should never need to touch them
+   again.  Add your Slot name from the yaml creation to the slot field, then
+   close the client.
 
-That is the whole chore. Step 5 is the one that makes the rest work, so do not
+That is the whole chore. Step 7 is the one that makes the rest work, so do not
 skip it: until the client knows both paths, a double-clicked patch can only
 tell you what is missing.
 
@@ -113,15 +118,14 @@ still host the room once the seed exists.
    loaded and starts DuckStation on your patched disc.
 2. In the client, set the **Server** dropdown to `archipelago.gg`.
 3. Enter the **Port** from the room page.
-4. Enter your **Slot**, spelled exactly as in your YAML.
+4. Enter your **Slot** if you haven't already, spelled exactly as in your YAML.
 5. Enter the room's password if it has one, then click **Connect**.
 
 > [!NOTE]
 > Double-clicking the patch starts DuckStation right away, so the game will be
 > booting while you fill in the room details. If you would rather not be
-> rushed, open the client on its own instead. It remembers your last patch, so
-> you can fill in the server details first and press **Launch Game** when you
-> are ready.
+> rushed, open the client on its own instead. On first run of a patch you will
+> need to browse for the patch before clicking **Launch Game**.
 
 The first time you use a given patch, the client builds the disc before
 launching, which takes a moment. Every later launch of that seed starts
@@ -133,8 +137,8 @@ you, and the Discord above is a reasonable place to get unstuck.
 
 You can play disconnected. The game records pickups and purchases on its own,
 and reconnecting submits what you collected while restoring what the server
-already confirmed. If DuckStation closes or restarts, a connected client
-reattaches on its own without leaving the room.
+already confirmed. If DuckStation ever closes, use the clients **Launch game**
+to bring it back, and it will reattach on its own without leaving the server.
 
 ## Where the files go, and a word about disk space
 
@@ -142,15 +146,14 @@ The client writes the patched disc **next to the `.adpatch` file**, named after
 it. A patch called `AP_12345_P1_Yourname.adpatch` produces
 `AP_12345_P1_Yourname.bin` and a matching `.cue` in the same folder.
 
-That BIN is a full copy of the disc, so it is **roughly 300 MB per seed**.
+That BIN is a full copy of the disc, so it is **roughly 290 MB per seed**.
 
 Two consequences worth planning for:
 
 - **Give each seed its own folder.** Double-clicking a patch that is sitting
   loose on your Desktop will drop a 300 MB BIN and a CUE onto your Desktop.
-- **Old seeds are safe to delete.** Once you are finished with a seed, its
-  `.bin` and `.cue` can go. Keep the `.adpatch` if you want to rebuild it
-  later, since it is only a few hundred kilobytes.
+- **Old seeds are safe to delete.** Once you are finished with a seed, all files
+  created can be deleted.
 
 Your original BIN is never modified. It is verified against the known original
 disc, copied, and the copy is patched. If the image does not match, the client
