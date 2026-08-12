@@ -1,0 +1,9 @@
+# Normalize line endings in the repository. The working tree is Windows, the
+# source is a mix of CRLF and LF, and without this every checkout on another
+# machine shows the whole tree as modified.
+* text=auto
+
+# The world's own assembled blobs and its base patch are binary. Never let
+# line-ending normalization near them - it would corrupt them silently.
+*.bin binary
+*.ppf binary

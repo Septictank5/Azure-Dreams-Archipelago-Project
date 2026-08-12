@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+bin/
+obj/
+__pycache__/
+*.pyc
+*.user
+*.suo
+.vs/
+.logs/
+
+# ---------------------------------------------------------------------------
+# Never commit game data.
+#
+# This world is developed alongside disc images, RAM dumps and save states.
+# None of that belongs in a repository - it is copyrighted game content, and
+# the working directory is full of it. Blanket-ignore the extensions first so
+# a stray copy can never be staged by accident, then re-admit the handful of
+# small blobs the world genuinely ships (its own assembled data, and the base
+# patch, which is a diff rather than game content).
+# ---------------------------------------------------------------------------
+*.bin
+*.iso
+*.cue
+*.img
+*.sfc
+*.smc
+*.n64
+*.z64
+*.sav
+*.srm
+*.mcd
+*.mcr
+*.state
+*.bak
+!worlds/azure_dreams/data/*.bin
+
+# Directories from the development tree, named explicitly in case any of this
+# is ever copied into a wider checkout.
+patches/
+releases/
+extracted/
+ghidra/
+ghidra_logs/
+sharedtests/
+Azure Dreams (Original)/
+
+# ---------------------------------------------------------------------------
+# Release artifacts. These are attached to a GitHub Release, never tracked -
+# the client is a ~74 MB single-file publish that changes completely on every
+# build, and git would keep every copy forever.
+# ---------------------------------------------------------------------------
+*.apworld
+*.exe
+*.dll
+*.zip

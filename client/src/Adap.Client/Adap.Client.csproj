@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>AzureDreams.Archipelago.Client</AssemblyName>
+    <RootNamespace>Adap.Client</RootNamespace>
+    <!-- Release channel. An ordinary build is the DEV client: it handles
+         .adpatch-dev files and badges its window. Only the promote script
+         (tools/Promote-AdapStable.py) passes -p:AdapChannel=stable, producing
+         the client that handles .adpatch. Defaulting to dev means no ordinary
+         publish can ever masquerade as the stable client - promoting is the
+         only way the stable pair changes. -->
+    <AdapChannel Condition="'$(AdapChannel)' == ''">dev</AdapChannel>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(AdapChannel)' == 'stable'">
+    <DefineConstants>$(DefineConstants);ADAP_STABLE</DefineConstants>
+  </PropertyGroup>
+
+  <!-- The channels are two different programs and carry two different exe
+       names. Windows records "Open With" choices by BARE EXE NAME
+       (Applications\<name>), so with a shared name whichever channel
+       registered last owned both extensions - a browsed .adpatch-dev opened
+       the stable client, which refused it (hit live 2026-08-09). The stable
+       channel keeps the canonical player-facing name; dev gets its own.
+       (Distinct from AzureDreams.Archipelago.Client.Dev.exe, which is the
+       frozen 2026-08-05 diagnostics snapshot in Adap.Client.Dev/.) -->
+  <PropertyGroup Condition="'$(AdapChannel)' != 'stable'">
+    <AssemblyName>AzureDreams.Archipelago.DevClient</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <!-- The bundled .NET runtime dominates the exe (~178 MB raw). WinForms
+         cannot be trimmed, but the single-file bundle can be compressed:
+         roughly half the size on disk at the cost of a moment's extra
+         startup on first launch. Added 2026-08-05 for the public release. -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Archipelago.MultiClient.Net" Version="6.7.1" />
+  </ItemGroup>
+
+  <!-- UI art is embedded so the published single-file exe stays self-contained. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\**\*.png" />
+    <EmbeddedResource Include="Assets\**\*.ico" />
+    <EmbeddedResource Include="Assets\**\*.jpg" />
+    <None Remove="Assets\**\*.md" />
+    <!-- Linked, not copied: the repository root file stays the single source
+         of truth for item names and their icons. -->
+    <EmbeddedResource Include="..\..\..\data.json"
+                      LogicalName="Adap.Client.Assets.data.json" />
+  </ItemGroup>
+
+</Project>

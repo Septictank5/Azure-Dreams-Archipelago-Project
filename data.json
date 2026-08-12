@@ -1,0 +1,760 @@
+{
+    "1": {
+        "1": [
+            "Medicinal Herb",
+            "herb.png"
+        ],
+        "2": [
+            "Antidote Herb",
+            "herb.png"
+        ],
+        "3": [
+            "Antichaos Herb",
+            "herb.png"
+        ],
+        "4": [
+            "Wake-Up Herb",
+            "herb.png"
+        ],
+        "5": [
+            "Cure-All Herb",
+            "herb.png"
+        ],
+        "6": [
+            "Hazak Herb",
+            "herb.png"
+        ],
+        "7": [
+            "Shomuro Herb",
+            "herb.png"
+        ],
+        "8": [
+            "Healing Herb",
+            "herb.png"
+        ],
+        "9": [
+            "Poison Herb",
+            "herb.png"
+        ],
+        "10": [
+            "Paralyze Herb",
+            "herb.png"
+        ],
+        "11": [
+            "Harash Herb",
+            "herb.png"
+        ],
+        "12": [
+            "Horrey Herb",
+            "herb.png"
+        ],
+        "13": [
+            "Sleep Herb",
+            "herb.png"
+        ],
+        "14": [
+            "Roeam Herb",
+            "herb.png"
+        ],
+        "15": [
+            "Medicinal Herb",
+            "herb.png"
+        ],
+        "has_quality": false
+    },
+    "2": {
+        "1": [
+            "Pita Fruit",
+            "fruit.png"
+        ],
+        "2": [
+            "Big Pita Fruit",
+            "fruit.png"
+        ],
+        "3": [
+            "Tumna Fruit",
+            "fruit.png"
+        ],
+        "4": [
+            "Leva Fruit",
+            "fruit.png"
+        ],
+        "5": [
+            "Leolam Fruit",
+            "fruit.png"
+        ],
+        "6": [
+            "Laev Fruit",
+            "fruit.png"
+        ],
+        "7": [
+            "Roche Fruit",
+            "fruit.png"
+        ],
+        "8": [
+            "Limit Fruit",
+            "fruit.png"
+        ],
+        "9": [
+            "Oleem Fruit",
+            "fruit.png"
+        ],
+        "10": [
+            "Geropita Fruit",
+            "fruit.png"
+        ],
+        "has_quality": false
+    },
+    "3": {
+        "1": [
+            "Hazak Seed",
+            "seed.png"
+        ],
+        "2": [
+            "Shomuro Seed",
+            "seed.png"
+        ],
+        "3": [
+            "Mazarr Seed",
+            "seed.png"
+        ],
+        "4": [
+            "Mahell Seed",
+            "seed.png"
+        ],
+        "5": [
+            "Light Seed",
+            "seed.png"
+        ],
+        "6": [
+            "Sea Seed",
+            "seed.png"
+        ],
+        "7": [
+            "Wind Seed",
+            "seed.png"
+        ],
+        "8": [
+            "Lar Seed",
+            "seed.png"
+        ],
+        "9": [
+            "Slow Seed",
+            "seed.png"
+        ],
+        "10": [
+            "Tovar Seed",
+            "seed.png"
+        ],
+        "has_quality": false
+    },
+    "4": {
+        "1": [
+            "Fire Ball",
+            "ball.png"
+        ],
+        "2": [
+            "Blaze Ball",
+            "ball.png"
+        ],
+        "3": [
+            "Flame Ball",
+            "ball.png"
+        ],
+        "4": [
+            "Pillar Ball",
+            "ball.png"
+        ],
+        "5": [
+            "Poison Ball",
+            "ball.png"
+        ],
+        "6": [
+            "Water Ball",
+            "ball.png"
+        ],
+        "7": [
+            "Repel Ball",
+            "ball.png"
+        ],
+        "8": [
+            "Ice Rock Ball",
+            "ball.png"
+        ],
+        "9": [
+            "Recovery Ball",
+            "ball.png"
+        ],
+        "11": [
+            "Blinder Ball",
+            "ball.png"
+        ],
+        "12": [
+            "Binding Ball",
+            "ball.png"
+        ],
+        "13": [
+            "Sleep Ball",
+            "ball.png"
+        ],
+        "14": [
+            "Weak Ball",
+            "ball.png"
+        ],
+        "17": [
+            "Acid Rain Ball",
+            "ball.png"
+        ],
+        "has_quality": true
+    },
+    "5": {
+        "1": [
+            "Holy Scroll",
+            "scroll.png"
+        ],
+        "2": [
+            "Malicious Scroll",
+            "scroll.png"
+        ],
+        "3": [
+            "Trap Scroll",
+            "scroll.png"
+        ],
+        "4": [
+            "Restore Scroll",
+            "scroll.png"
+        ],
+        "5": [
+            "De-Curse Scroll",
+            "scroll.png"
+        ],
+        "6": [
+            "Flat Scroll",
+            "scroll.png"
+        ],
+        "7": [
+            "Alchemic Scroll",
+            "scroll.png"
+        ],
+        "has_quality": false
+    },
+    "6": {
+        "1": [
+            "Fire Crystal",
+            "crystal.png"
+        ],
+        "2": [
+            "Water Crystal",
+            "crystal.png"
+        ],
+        "3": [
+            "Wind Crystal",
+            "crystal.png"
+        ],
+        "has_quality": false
+    },
+    "7": {
+        "1": [
+            "Holy Bell",
+            "bell.png"
+        ],
+        "2": [
+            "Malicious Bell",
+            "bell.png"
+        ],
+        "3": [
+            "Familiar Bell",
+            "bell.png"
+        ],
+        "has_quality": false
+    },
+    "8": {
+        "1": [
+            "Truth Glasses",
+            "glasses.png"
+        ],
+        "2": [
+            "Star Glasses",
+            "glasses.png"
+        ],
+        "has_quality": false
+    },
+    "9": {
+        "1": [
+            "Exit Loupe",
+            "loupe.png"
+        ],
+        "2": [
+            "Trap Loupe",
+            "loupe.png"
+        ],
+        "3": [
+            "Focus Loupe",
+            "loupe.png"
+        ],
+        "4": [
+            "Monster Loupe",
+            "loupe.png"
+        ],
+        "5": [
+            "Treasure Loupe",
+            "loupe.png"
+        ],
+        "has_quality": false
+    },
+    "10": {
+        "1": [
+            "Red Sand",
+            "sand.png"
+        ],
+        "2": [
+            "Blue Sand",
+            "sand.png"
+        ],
+        "3": [
+            "White Sand",
+            "sand.png"
+        ],
+        "has_quality": false
+    },
+    "11": {
+        "1": [
+            "Cream",
+            "gift.png"
+        ],
+        "2": [
+            "Roses",
+            "roses.png"
+        ],
+        "3": [
+            "Hand Bag",
+            "gift.png"
+        ],
+        "4": [
+            "Ring",
+            "ring.png"
+        ],
+        "5": [
+            "Duck",
+            "duck.png"
+        ],
+        "has_quality": false
+    },
+    "12": {
+        "1": [
+            "Rope",
+            "gift.png"
+        ],
+        "2": [
+            "Mallet",
+            "mallet.png"
+        ],
+        "3": [
+            "Red Collar",
+            "redcollar.png"
+        ],
+        "4": [
+            "Blue Collar",
+            "bluecollar.png"
+        ],
+        "5": [
+            "Box",
+            "gift.png"
+        ],
+        "6": [
+            "Meat",
+            "meat.png"
+        ],
+        "7": [
+            "Balloon",
+            "gift.png"
+        ],
+        "8": [
+            "Cloak",
+            "cloak.png"
+        ],
+        "9": [
+            "Oleem",
+            "oleem.png"
+        ],
+        "has_quality": false
+    },
+    "13": {
+        "1": [
+            "Guru's Pot",
+            "pot.png"
+        ],
+        "2": [
+            "W. Medal",
+            "medal.png"
+        ],
+        "3": [
+            "Dumplings",
+            "gift.png"
+        ],
+        "4": [
+            "Music Box",
+            "gift.png"
+        ],
+        "5": [
+            "Eye Glasses",
+            "gift.png"
+        ],
+        "6": [
+            "Blue Cape",
+            "bluecape.png"
+        ],
+        "7": [
+            "Chappie",
+            "gift.png"
+        ],
+        "has_quality": false
+    },
+    "14": {
+        "1": [
+            "Copper Coin",
+            "coppercoin.png"
+        ],
+        "2": [
+            "Silver Coin",
+            "silvercoin.png"
+        ],
+        "3": [
+            "Gold Coin",
+            "goldcoin.png"
+        ],
+        "has_quality": false
+    },
+    "15": {
+        "1": [
+            "Gold Sword",
+            "sword.png"
+        ],
+        "2": [
+            "Copper Sword",
+            "sword.png"
+        ],
+        "3": [
+            "Iron Sword",
+            "sword.png"
+        ],
+        "4": [
+            "Steel Sword",
+            "sword.png"
+        ],
+        "5": [
+            "Fire Sword",
+            "sword.png"
+        ],
+        "6": [
+            "Blizzard Sword",
+            "sword.png"
+        ],
+        "7": [
+            "Gulfwind Sword",
+            "sword.png"
+        ],
+        "8": [
+            "Vital Sword",
+            "sword.png"
+        ],
+        "9": [
+            "Dark Sword",
+            "sword.png"
+        ],
+        "10": [
+            "Holy Sword",
+            "sword.png"
+        ],
+        "11": [
+            "Seraphim Sword",
+            "sword.png"
+        ],
+        "12": [
+            "Seraphim Sword",
+            "sword.png"
+        ],
+        "13": [
+            "Troll Sword",
+            "trollsword.png"
+        ],
+        "14": [
+            "Hammer",
+            "hammer.png"
+        ],
+        "15": [
+            "Bow Gun",
+            "bowgun.png"
+        ],
+        "has_quality": true
+    },
+    "16": {
+        "1": [
+            "Wooden Wand",
+            "wand.png"
+        ],
+        "2": [
+            "Trained Wand",
+            "wand.png"
+        ],
+        "3": [
+            "Life Wand",
+            "wand.png"
+        ],
+        "4": [
+            "Paralyze Wand",
+            "wand.png"
+        ],
+        "5": [
+            "Money Wand",
+            "wand.png"
+        ],
+        "6": [
+            "Scarlet Wand",
+            "wand.png"
+        ],
+        "7": [
+            "Stream Wand",
+            "wand.png"
+        ],
+        "8": [
+            "Gulf Wand",
+            "wand.png"
+        ],
+        "9": [
+            "Seal Wand",
+            "wand.png"
+        ],
+        "has_quality": true
+    },
+    "17": {
+        "1": [
+            "Wood Shield",
+            "shield.png"
+        ],
+        "2": [
+            "Leather Shield",
+            "shield.png"
+        ],
+        "3": [
+            "Mirror Shield",
+            "shield.png"
+        ],
+        "4": [
+            "Copper Shield",
+            "shield.png"
+        ],
+        "5": [
+            "Iron Shield",
+            "shield.png"
+        ],
+        "6": [
+            "Steel Shield",
+            "shield.png"
+        ],
+        "7": [
+            "Diamond Shield",
+            "shield.png"
+        ],
+        "8": [
+            "Scorch Shield",
+            "shield.png"
+        ],
+        "9": [
+            "Ice Shield",
+            "shield.png"
+        ],
+        "10": [
+            "Earth Shield",
+            "shield.png"
+        ],
+        "11": [
+            "Live Shield",
+            "shield.png"
+        ],
+        "has_quality": true
+    },
+    "18": {
+        "1": [
+            "Ultimate Egg",
+            "egg.png"
+        ],
+        "2": [
+            "Kewne Egg",
+            "egg.png"
+        ],
+        "3": [
+            "Dragon Egg",
+            "egg.png"
+        ],
+        "4": [
+            "Kid Egg",
+            "egg.png"
+        ],
+        "5": [
+            "Ifrit Egg",
+            "egg.png"
+        ],
+        "6": [
+            "Flame Egg",
+            "egg.png"
+        ],
+        "7": [
+            "Grineut Egg",
+            "egg.png"
+        ],
+        "8": [
+            "Griffon Egg",
+            "egg.png"
+        ],
+        "9": [
+            "Saber Egg",
+            "egg.png"
+        ],
+        "10": [
+            "Snowman Egg",
+            "egg.png"
+        ],
+        "11": [
+            "Ashra Egg",
+            "egg.png"
+        ],
+        "12": [
+            "Arachne Egg",
+            "egg.png"
+        ],
+        "13": [
+            "Battnel Egg",
+            "egg.png"
+        ],
+        "14": [
+            "Nyuel Egg",
+            "egg.png"
+        ],
+        "15": [
+            "Death Egg",
+            "egg.png"
+        ],
+        "16": [
+            "Clown Egg",
+            "egg.png"
+        ],
+        "17": [
+            "Univern Egg",
+            "egg.png"
+        ],
+        "18": [
+            "Unicorn Egg",
+            "egg.png"
+        ],
+        "19": [
+            "Metal Egg",
+            "egg.png"
+        ],
+        "20": [
+            "Block Egg",
+            "egg.png"
+        ],
+        "21": [
+            "Pulunpa Egg",
+            "egg.png"
+        ],
+        "22": [
+            "Troll Egg",
+            "egg.png"
+        ],
+        "23": [
+            "Noise Egg",
+            "egg.png"
+        ],
+        "24": [
+            "U-Boat Egg",
+            "egg.png"
+        ],
+        "25": [
+            "Baloon Egg",
+            "egg.png"
+        ],
+        "26": [
+            "Dreamin Egg",
+            "egg.png"
+        ],
+        "27": [
+            "Blume Egg",
+            "egg.png"
+        ],
+        "28": [
+            "Volcano Egg",
+            "egg.png"
+        ],
+        "29": [
+            "Cyclone Egg",
+            "egg.png"
+        ],
+        "30": [
+            "Manoeva Egg",
+            "egg.png"
+        ],
+        "31": [
+            "Barong Egg",
+            "egg.png"
+        ],
+        "32": [
+            "Picket Egg",
+            "egg.png"
+        ],
+        "33": [
+            "Kraken Egg",
+            "egg.png"
+        ],
+        "34": [
+            "Weadog Egg",
+            "egg.png"
+        ],
+        "35": [
+            "Stealth Egg",
+            "egg.png"
+        ],
+        "36": [
+            "Viper Egg",
+            "egg.png"
+        ],
+        "37": [
+            "Naplass Egg",
+            "egg.png"
+        ],
+        "38": [
+            "Zu Egg",
+            "egg.png"
+        ],
+        "39": [
+            "Mandara Egg",
+            "egg.png"
+        ],
+        "40": [
+            "Killer Egg",
+            "egg.png"
+        ],
+        "41": [
+            "Garuda Egg",
+            "egg.png"
+        ],
+        "42": [
+            "Glacier Egg",
+            "egg.png"
+        ],
+        "43": [
+            "Tyrant Egg",
+            "egg.png"
+        ],
+        "44": [
+            "Golem Egg",
+            "egg.png"
+        ],
+        "45": [
+            "Maximum Egg",
+            "egg.png"
+        ],
+        "has_quality": false
+    }
+}
