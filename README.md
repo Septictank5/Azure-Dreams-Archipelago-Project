@@ -25,11 +25,8 @@ exactly that:
 
 ### [discord.gg/GcNfZCB9TZ](https://discord.gg/GcNfZCB9TZ)
 
-Randomizer or not, it is a room full of people who love this game. Share a
-run, show off a familiar you got too attached to, argue about what to do with
-the top floor, or hand the game to somebody who has never played it. New
-players are genuinely welcome, and so is anybody who just wants to talk about
-a twenty-five year old PlayStation roguelike with people who get it.
+Randomizer or not, it is a room full of people who love this game. New
+players are genuinely welcome.
 
 Screenshots and walkthroughs of the setup below get posted there too.
 
@@ -60,9 +57,9 @@ Each release is a **pair**: one `azure_dreams.apworld` and one
 1. **Install the apworld.** Double-click `azure_dreams.apworld`. The
    Archipelago Launcher opens and installs it into your `custom_worlds`
    folder. Restart Archipelago afterwards if it was already running.
-2. **Unzip the client** somewhere sensible and keep its folder together. The
-   `.dll` files beside the `.exe` are part of it. Do not put it in your
-   Downloads folder, where you will lose it.
+2. **Put the client somewhere sensible.** It is a single executable with
+   nothing beside it, so anywhere works, but do not leave it in your Downloads
+   folder where you will lose it.
 3. **Turn on DuckStation's shared memory.** Enable
    **Settings > Advanced > Show Debug Menu**, then
    **Settings > Debugging > Export Shared Memory**. The client reads the
@@ -76,9 +73,9 @@ Each release is a **pair**: one `azure_dreams.apworld` and one
    executable. Both paths are saved, and you should never need to touch them
    again.
 6. **Make a player options file.** Click **Create YAML**, fill in your slot
-   name and options, and save it. For generating locally, put it in your
-   Archipelago install's `Players` folder. For a room generated on the
-   website, upload it there instead.
+   name and options, and save it into your Archipelago install's `Players`
+   folder. Remember the slot name you chose, because you type it again when
+   you connect.
 
 That is the whole chore. Step 5 is the one that makes the rest work, so do not
 skip it: until the client knows both paths, a double-clicked patch can only
@@ -86,23 +83,53 @@ tell you what is missing.
 
 ## Playing a seed
 
-Once setup is done, every future seed goes like this:
+Azure Dreams is not part of official Archipelago yet, so **archipelago.gg
+cannot generate it**. Generation happens on your own machine. The website can
+still host the room once the seed exists.
 
-1. Generate the seed, or have the host generate it, and start the room.
-2. Open the zip you get back and find your `.adpatch` file. Each Azure Dreams
-   player gets their own, and it must be **yours**.
-3. **Double-click it.** The client opens, builds your patched disc if it does
-   not already exist, and starts DuckStation on it.
-4. Enter the room's server, port, slot name and any password, then
-   **Connect**. **Save Server** keeps the address filled in for next time.
+### Generate the seed
 
-That is it. No external patching tool, no separate base patch, no command
-line. Your `.adpatch` already carries the common game changes together with
-your slot's item names, recipient names, remote-item visuals and seed
-identity.
+1. Make sure `azure_dreams.apworld` is installed in your Archipelago install's
+   `custom_worlds` folder. Double-clicking the apworld does this for you.
+2. Put every player's YAML into the `Players` folder. That means everyone in
+   the multiworld, not just the Azure Dreams players.
+3. Run `ArchipelagoGenerate.exe`.
+4. Look in the `output` folder for the zip it produced, and extract it. Inside
+   are the `.archipelago` server file and one `.adpatch` file for each Azure
+   Dreams player.
 
-Later launches of the same seed skip the build and start immediately, because
-the patched disc is already there.
+### Host the room
+
+1. Go to [archipelago.gg](https://archipelago.gg), then
+   **Start Playing > Host a pre-generated game**.
+2. Choose the `.archipelago` file you just extracted.
+3. Click **Create Room**. The room page shows the port your players connect
+   on.
+
+### Connect
+
+1. **Double-click your own `.adpatch` file.** Each Azure Dreams player has
+   their own and they are not interchangeable. The client opens with it
+   loaded and starts DuckStation on your patched disc.
+2. In the client, set the **Server** dropdown to `archipelago.gg`.
+3. Enter the **Port** from the room page.
+4. Enter your **Slot**, spelled exactly as in your YAML.
+5. Enter the room's password if it has one, then click **Connect**.
+
+> [!NOTE]
+> Double-clicking the patch starts DuckStation right away, so the game will be
+> booting while you fill in the room details. If you would rather not be
+> rushed, open the client on its own instead. It remembers your last patch, so
+> you can fill in the server details first and press **Launch Game** when you
+> are ready.
+
+The first time you use a given patch, the client builds the disc before
+launching, which takes a moment. Every later launch of that seed starts
+immediately.
+
+None of this is as short as it looks written down, and the first run through
+is genuinely fiddly if Archipelago is new to you. That is normal, it is not
+you, and the Discord above is a reasonable place to get unstuck.
 
 You can play disconnected. The game records pickups and purchases on its own,
 and reconnecting submits what you collected while restoring what the server
