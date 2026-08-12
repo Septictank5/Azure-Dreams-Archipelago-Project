@@ -1,4 +1,4 @@
-# Azure Dreams — Archipelago
+# Azure Dreams Archipelago
 
 An [Archipelago](https://archipelago.gg) randomizer world for the North
 American PlayStation release of **Azure Dreams** (`SLUS-00614`), plus the
@@ -10,22 +10,22 @@ open the successive five-floor bands. Claiming the Ultimate Egg on floor 40
 completes the goal.
 
 Rewards arrive natively. The client hands each item to the game rather than
-editing the save: Koh plays his ordinary obtained-item animation, the item
-lands in his inventory through the game's own code, and a full inventory or an
-unsafe moment simply defers the delivery until it is safe.
+editing the save, so Koh plays his ordinary obtained-item animation and the
+item lands in his inventory through the game's own code. A full inventory or
+an unsafe moment simply defers the delivery until it is safe.
 
 ## Requirements
 
 - The North American PlayStation release of Azure Dreams (`SLUS-00614`), as a
-  raw BIN image. **Not included** — supply your own copy.
+  raw BIN image. **Not included.** Supply your own copy.
 - [DuckStation](https://www.duckstation.org/), with **Export Shared Memory**
   enabled.
-- Windows, for the client. No Python, .NET or PPF tooling needed — the client
-  is a single self-contained executable.
+- Windows, for the client. Nothing else to install: it is a single
+  self-contained executable, so no Python, .NET or patching tools are needed.
 
 ## Install
 
-Download the latest [release](../../releases). Each release is a **pair**: one
+Download the latest [release](https://github.com/Septictank5/Azure-Dreams-Archipelago-Project/releases). Each release is a **pair**: one
 `azure_dreams.apworld` and one `AzureDreams.Archipelago.Client.exe`.
 
 > [!IMPORTANT]
@@ -33,36 +33,43 @@ Download the latest [release](../../releases). Each release is a **pair**: one
 > on a save-journal and mailbox layout that changes between versions, and a
 > mismatched pair will not synchronize correctly.
 
-1. Drop `azure_dreams.apworld` into your Archipelago install's `custom_worlds`
-   folder.
-2. Unzip the client anywhere and keep its folder together — the `.dll` files
+1. Install the apworld: double-click `azure_dreams.apworld` to let the
+   Archipelago Launcher install it, or copy it into your Archipelago install's
+   `custom_worlds` folder.
+2. Unzip the client anywhere and keep its folder together. The `.dll` files
    beside the `.exe` are part of it.
-3. In DuckStation, enable **Settings → Advanced → Show Debug Menu**, then
-   **Settings → Debugging → Export Shared Memory**.
+3. In DuckStation, enable **Settings > Advanced > Show Debug Menu**, then
+   **Settings > Debugging > Export Shared Memory**.
 
 ## Play
 
-1. Generate a seed with an Azure Dreams player YAML. The client's
-   **Create YAML** button will make you one.
-2. The generated zip contains one `.ppf` per Azure Dreams player. In the
-   client, choose that PPF with **Patch File...**, choose your untouched
-   BIN with **Original ROM...**, and click **Patch ROM**. A patched BIN and
-   matching CUE are written beside the PPF; your original file is not
-   modified.
-3. Boot the new CUE in DuckStation.
-4. Enter the room's server, port, slot name and any password in the client,
-   then connect.
+Generating a seed produces a zip holding the `.archipelago` server file and one
+`.adpatch` file for each Azure Dreams player. That `.adpatch` is your patch: it
+already carries the common game changes together with your slot's item names,
+recipient names, remote-item visuals and seed identity. There is no separate
+base patch to apply first, and no external patching tool involved.
 
-The player PPF already contains everything — the common game changes and your
-slot's item names, recipients, remote-item visuals and seed identity. There is
-no separate base patch to apply first.
+If you need a player YAML, the client's **Create YAML** button will write one.
 
-You can play disconnected. The game records pickups and purchases on its own;
-reconnecting submits what you collected and restores what the server already
-confirmed.
+In the client:
+
+1. **Patch**: choose your `.adpatch` file.
+2. **Original ROM**: choose your clean, unmodified BIN. It is verified against
+   the known original and is never modified.
+3. **Emulator**: choose your DuckStation executable.
+4. Click **Launch Game**. The first launch builds the patched BIN and a
+   matching CUE beside your `.adpatch`, then boots DuckStation on it. Later
+   launches reuse that disc and start immediately.
+5. Enter the room's server, port, slot name and any password, then
+   **Connect**.
+
+You can play disconnected. The game records pickups and purchases on its own,
+and reconnecting submits what you collected while restoring what the server
+already confirmed. If DuckStation closes or restarts, a connected client
+reattaches on its own without leaving the room.
 
 A fuller walkthrough lives in
-[the setup guide](worlds/azure_dreams/docs/setup_en.md).
+[the setup guide](https://github.com/Septictank5/Azure-Dreams-Archipelago-Project/blob/main/worlds/azure_dreams/docs/setup_en.md).
 
 ## Building from source
 
@@ -73,14 +80,14 @@ the .NET 8 SDK:
 dotnet publish client/src/Adap.Client -c Release
 ```
 
-An ordinary build produces the **dev-channel** client, which handles
-`.adpatch-dev` files and badges its window; the released client is built from
-the same source with `-p:AdapChannel=stable`. `data.json` at the repository
-root is linked into the build and holds the item names and icons, so keep it
-where it is.
+That produces the same client the releases ship, handling `.adpatch` files.
+`Directory.Build.props` at the repository root is what selects that channel;
+see the comment inside it for why the project file itself defaults the other
+way. `data.json` at the repository root is linked into the build and holds the
+item names and icons, so keep it where it is.
 
 ## Credits and legal
 
-Azure Dreams is © Konami. This project ships no game code or game assets — the
-patch is a diff, and you supply your own disc image. It is an unaffiliated fan
-project and is not endorsed by Konami or by the Archipelago team.
+Azure Dreams is © Konami. This project ships no game code and no game assets.
+The patch is a diff, and you supply your own disc image. It is an unaffiliated
+fan project, not endorsed by Konami or by the Archipelago team.

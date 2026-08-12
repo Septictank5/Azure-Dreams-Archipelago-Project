@@ -15,18 +15,22 @@ Monster Shop stock requires keycard level 3. Acquiring the Ultimate Egg on
 floor 40 completes the goal.
 
 Generate normally with an Azure Dreams player YAML. The output zip contains a
-`.archipelago` server file and one `.ppf` for each Azure Dreams player. Apply
-only that player's PPF to a clean North American raw BIN image and boot its CUE.
-The PPF already combines the common game patch with the generated player's
-item names, recipient names, universal gift-marker visuals, and seed identity.
+`.archipelago` server file and one `.adpatch` file for each Azure Dreams player.
+Open only that player's `.adpatch` in the client, together with a clean North
+American raw BIN image; the client builds the patched BIN and a matching CUE
+beside it, leaving the original image untouched. The patch already combines the
+common game changes with the generated player's item names, recipient names,
+universal gift-marker visuals, and seed identity.
 
 ## Connect
 
 1. Enable DuckStation's **Export Shared Memory** option.
-2. Boot the player-patched image.
-3. Start or join the Archipelago room using the generated `.archipelago` file.
-4. Run `AzureDreams.Archipelago.Client.exe --connect host:port SlotName`, adding
-   the room password as a fourth argument when needed.
+2. Start or join the Archipelago room using the generated `.archipelago` file.
+3. In the client, choose the `.adpatch` file, the original BIN and your
+   DuckStation executable, then click **Launch Game**. The first launch builds
+   the patched disc; later launches reuse it and start immediately.
+4. Enter the room's server, port, slot name and any password, then click
+   **Connect**.
 
 The client can log in while Koh is in town. A brand-new patched save initializes
 its signed seed journal when Koh first enters the tower or opens a patched Buy

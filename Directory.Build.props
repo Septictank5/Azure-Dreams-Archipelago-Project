@@ -1,0 +1,25 @@
+<Project>
+
+  <!--
+    Builds from this repository produce the STABLE client.
+
+    Adap.Client.csproj defaults AdapChannel to `dev`, and that default is
+    correct where it lives. In the development tree an ordinary build must not
+    be able to masquerade as the released client, because Windows records
+    "Open With" choices by bare executable name: a dev build sharing the
+    released name would quietly take the .adpatch association away from the
+    real client. Defaulting to dev there means promotion stays the only way
+    the stable pair changes.
+
+    This repository is not that tree. Anyone building here wants the client
+    players actually use, the one that opens the .adpatch files a released
+    apworld generates, so the default is flipped back.
+
+    Pass the channel explicitly to override, for example:
+        dotnet publish client/src/Adap.Client -c Release -p:AdapChannel=dev
+  -->
+  <PropertyGroup>
+    <AdapChannel Condition="'$(AdapChannel)' == ''">stable</AdapChannel>
+  </PropertyGroup>
+
+</Project>
