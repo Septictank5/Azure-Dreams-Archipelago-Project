@@ -179,3 +179,12 @@ so keep it where it is.
 Azure Dreams is © Konami. This project ships no game code and no game assets.
 The patch is a diff, and you supply your own disc image. It is an unaffiliated
 fan project, not endorsed by Konami or by the Archipelago team.
+
+The code in this repository - the apworld and the client - is released under
+the [MIT License](LICENSE). Use it, change it, fork it, build on it,
+commercially or not. Keep the copyright notice with it, and understand it
+comes with no warranty of any kind.
+
+That license covers this project's own code and nothing else. It grants no
+rights to Konami's game data: the original disc, its assets and its text
+remain (c) Konami, are not distributed here, and are not mine to license.

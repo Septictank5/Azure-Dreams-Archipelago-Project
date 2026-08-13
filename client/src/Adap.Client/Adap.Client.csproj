@@ -8,6 +8,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>AzureDreams.Archipelago.Client</AssemblyName>
     <RootNamespace>Adap.Client</RootNamespace>
+    <!-- Surfaces on the exe's Details tab in Windows. The project is MIT;
+         LICENSE at the repository root is the authoritative text, and this
+         line only has to name the same holder it does. -->
+    <Copyright>Copyright (c) 2026 ADAP Team. MIT License.</Copyright>
     <!-- Release channel. An ordinary build is the DEV client: it handles
          .adpatch-dev files and badges its window. Only the promote script
          (tools/Promote-AdapStable.py) passes -p:AdapChannel=stable, producing
