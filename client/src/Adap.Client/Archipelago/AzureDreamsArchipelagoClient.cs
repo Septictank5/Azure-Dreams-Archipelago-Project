@@ -20,14 +20,19 @@ internal static class AzureDreamsArchipelagoClient
     // version-2 client cannot read the journal at all.
     // 15: trap items exist. A pre-trap client would deliver a trap item
     // into inventory as a Strange... gift instead of springing it.
-    private const int SupportedSlotDataVersion = 16;
+    // 16: Send Token items exist.
+    // 17: three tower checks per floor (117) and ADSV v4 - moved base, a
+    // one-byte-per-floor journal, the town half of one unified mask, the
+    // intro flags in a field of their own. A v3 client cannot find the
+    // record at all.
+    private const int SupportedSlotDataVersion = 19;
     private const long ProgressiveKeycardItemId = 0x0AD0_0000;
     internal const long ProgressiveKeycardItemIdForTest = ProgressiveKeycardItemId;
     // Granted straight into the gold counter, no inventory slot and no
     // native descriptor - and since 2026-08-05 (journal v3) it cuts the
     // delivery line the way keycards do: the queue exists because inventory
     // space is finite, and gold consumes none. Eager granting is made
-    // exactly-once by the durable gold-granted counter at ADSV +0x28, which
+    // exactly-once by the durable gold-granted counter (ADSV GoldGrantedCountOffset), which
     // is reconciled against the history count every poll and rolls back
     // with the gold counter and the cursor on a checkpoint restore.
     private const long GoldPackageItemId = 0x0AD0_0001;
@@ -44,6 +49,23 @@ internal static class AzureDreamsArchipelagoClient
     // live count says nothing about how many ever arrived.
     private const long SendTokenItemId = 0x0AD0_0002;
     internal const long SendTokenItemIdForTest = SendTokenItemId;
+    // The blacksmith's progressive unlocks (docs/systems/blacksmith.md): a Red
+    // Sand is one WEAPON temper level, a Blue Sand one SHIELD temper level,
+    // three of each in the pool. They keep the native item names and the
+    // native protocol ids (category 10, ids 1 and 2, quality 0, no flags) so
+    // every client already decodes and displays them - but they never enter
+    // the bag: like keycards they are applied eagerly from the full history
+    // to the two ADSV level bytes and cut the delivery line.
+    private static readonly long RedSandItemId = AzureDreamsItemManifest.EncodeProtocolItemId(10, 1, 0);
+    private static readonly long BlueSandItemId = AzureDreamsItemManifest.EncodeProtocolItemId(10, 2, 0);
+    // The ball charger's unlock (docs/systems/fortune-teller.md section 5): a
+    // White Sand is one charge level (1/2/3 charges per town visit), three in
+    // the pool, applied
+    // to the byte beside ADSV the same way.
+    private static readonly long WhiteSandItemId = AzureDreamsItemManifest.EncodeProtocolItemId(10, 3, 0);
+    internal static long RedSandItemIdForTest => RedSandItemId;
+    internal static long BlueSandItemIdForTest => BlueSandItemId;
+    internal static long WhiteSandItemIdForTest => WhiteSandItemId;
     // Trap items: own-world only, disguised in the tower as Progressive
     // Keycards (docs/systems/forced-trap.md). The protocol id carries the
     // GAME trap id in the low byte - TrapItemIdBase + 1..19 - which is the
@@ -73,22 +95,85 @@ internal static class AzureDreamsArchipelagoClient
     internal static bool IsTrapItemId(long itemId) =>
         itemId > TrapItemIdBase && itemId <= TrapItemIdBase + TrapGameIdCount;
 
+    private static bool IsTemperSandItemId(long itemId) =>
+        itemId == RedSandItemId || itemId == BlueSandItemId || itemId == WhiteSandItemId;
+
     private static bool IsLineCutterItemId(long itemId) =>
         itemId == ProgressiveKeycardItemId ||
         itemId == GoldPackageItemId ||
         itemId == SendTokenItemId ||
+        IsTemperSandItemId(itemId) ||
         IsTrapItemId(itemId);
+
+    /// <summary>
+    /// A trap waiting for the request byte, and the floor its pickup happened
+    /// on. The floor is half the exactly-once story now: see
+    /// <see cref="ForcedTrapQueue"/>.
+    /// </summary>
+    internal readonly record struct PendingTrap(byte TrapId, int Floor);
 
     /// <summary>
     /// Traps waiting for the request byte. One byte is one pending trap, so
     /// the queue holds the rest; the head is only removed when the stub is
-    /// seen to consume its write, and a game reboot merely rewrites the head
-    /// (the byte is mailbox state and does not survive a power cycle).
+    /// seen to consume its write.
+    ///
+    /// <para><b>A trap springs at its pickup or not at all (2026-08-18).</b>
+    /// It used to spring at the next opportunity, wherever and whenever that
+    /// turned out to be, and two things could hand it one long after the
+    /// moment it belonged to:</para>
+    ///
+    /// <list type="bullet">
+    /// <item>a client attaching to a save holding checks the server had never
+    /// heard of - collected offline - reported them all at once, and every
+    /// trap among them queued;</item>
+    /// <item>a pending trap outliving the trip it was picked up in, so a
+    /// reload or an elevator ride carried it to the next floor.</item>
+    /// </list>
+    ///
+    /// <para>Both land the same way, and it is the worst possible way: the
+    /// first frame of a freshly loaded floor is Koh's turn, and springing a
+    /// trap there spends it - the floor's monsters move first, against a
+    /// player who has not seen the room yet. That is how a Bomb Trap killed a
+    /// run on arrival. So: <see cref="ObservedGameChecks"/> makes a trap arm
+    /// only for a pickup this client WATCHED happen, and the recorded floor
+    /// makes it spring only while the player is still standing there.</para>
     /// </summary>
     internal sealed class ForcedTrapQueue
     {
-        public readonly List<byte> Pending = [];
+        public readonly List<PendingTrap> Pending = [];
         public bool WriteInFlight;
+
+        /// <summary>
+        /// Locations already collected in the GAME the first time this client
+        /// looked at the save. Null until that first look. Everything in here
+        /// is history: reporting it to the server is bookkeeping, not a
+        /// pickup, and history does not spring traps.
+        /// </summary>
+        public HashSet<long>? ObservedGameChecks;
+
+        /// <summary>
+        /// The floor the player was standing on at the last pump, which is one
+        /// poll ago. A pickup reported on a DIFFERENT floor than that is a
+        /// pickup we only heard about after the player had already left it -
+        /// the 100 ms race between the collect hook writing the journal bit
+        /// and this client reading it. Rare, and rare is exactly what this
+        /// whole rule is about.
+        /// </summary>
+        public int FloorAtLastPoll;
+
+        /// <summary>
+        /// Forgets the attached game: a queued trap belongs to one floor of
+        /// one trip, and the save in front of us after a reattach or a
+        /// checkpoint restore is not that one. Called wherever the location
+        /// bookkeeping is reset for the same reason.
+        /// </summary>
+        public void ForgetGameSession()
+        {
+            Pending.Clear();
+            WriteInFlight = false;
+            ObservedGameChecks = null;
+            FloorAtLastPoll = 0;
+        }
     }
 
     private static readonly IReadOnlyDictionary<byte, string> TrapNameByGameId =
@@ -112,48 +197,150 @@ internal static class AzureDreamsArchipelagoClient
         };
 
     /// <summary>
+    /// Whether a trap-holding location's first report to the server is a
+    /// PICKUP this client watched happen, on a floor it can still spring on.
+    ///
+    /// <para>Four ways it is not, and every one of them ends with the trap
+    /// going off on the first frame of a floor - the frame that is Koh's turn,
+    /// so springing there spends it and hands the floor's monsters the first
+    /// move against a player who has not seen the room yet.</para>
+    /// </summary>
+    /// <param name="armingPrimed">
+    /// False on the first look at an attached save: everything in it is
+    /// history until we have seen it once.
+    /// </param>
+    /// <param name="alreadyInSave">
+    /// The location was already collected when this client first looked -
+    /// picked up offline, or before this session. Reporting it is bookkeeping.
+    /// </param>
+    /// <param name="pickupFloor">Where the player is standing now, 0 for anywhere but a tower floor.</param>
+    /// <param name="floorAtLastPoll">Where they were a poll ago.</param>
+    internal static bool IsTrapSpringable(
+        bool armingPrimed,
+        bool alreadyInSave,
+        int pickupFloor,
+        int floorAtLastPoll,
+        out string refusal)
+    {
+        if (!armingPrimed || alreadyInSave)
+        {
+            refusal = "it was already collected in this save; reporting it, not springing it";
+            return false;
+        }
+        if (pickupFloor == 0)
+        {
+            refusal = "it was reported from outside the tower, so there is no floor to spring it on";
+            return false;
+        }
+        if (pickupFloor != floorAtLastPoll)
+        {
+            refusal =
+                $"the player reached floor {pickupFloor} between polls, so the pickup " +
+                "cannot be placed on the floor it happened on";
+            return false;
+        }
+
+        refusal = string.Empty;
+        return true;
+    }
+
+    /// <summary>
     /// Drives the forced-trap request byte from the pending queue. Written
     /// any time the byte is clear (the seed-page stub itself defers until
     /// Koh is idle on an ordinary tower floor); observed-consumed pops the
     /// head and announces the trap by its real name - the one moment the
     /// disguise is allowed to drop, because it just went off.
+    ///
+    /// <para>A pending trap that has left its floor is DROPPED, not carried:
+    /// see <see cref="ForcedTrapQueue"/>. Springing late is worse than not
+    /// springing, because late means "on the first frame of a floor", which
+    /// is the frame that costs the player their turn.</para>
     /// </summary>
     internal static void PumpForcedTraps(
         Adap.Client.Emulators.IEmulatorMemory memory,
         ForcedTrapQueue traps)
     {
+        // Read every pump, queue or no queue: arming needs to know the player
+        // was ALREADY standing here one poll ago, which is what tells a pickup
+        // apart from a journal bit noticed just after a floor change.
+        int liveFloor = AzureDreamsTowerProgressReader.ReadLiveTowerFloor(memory);
+        traps.FloorAtLastPoll = liveFloor;
+
+        if (traps.Pending.Count == 0 && !traps.WriteInFlight)
+            return;
+
         Span<byte> current = stackalloc byte[1];
         if (!memory.TryRead(ForcedTrapRequestAddress, current, out _))
             return;
 
-        if (current[0] != 0)
+        if (current[0] == 0 && traps.WriteInFlight && traps.Pending.Count > 0)
         {
-            // In flight (or a manual poke); the stub owns it from here.
-            return;
-        }
-
-        if (traps.WriteInFlight)
-        {
-            // The write this client made has been consumed: the trap fired
-            // (or the console power-cycled, in which case rewriting a trap
-            // that MAY have fired is the chosen failure direction - a trap
-            // lost silently would be the delivery breaking its promise).
-            byte sprung = traps.Pending[0];
+            // The write this client made has been consumed: the trap fired.
+            PendingTrap sprung = traps.Pending[0];
             traps.Pending.RemoveAt(0);
             traps.WriteInFlight = false;
-            string name = TrapNameByGameId.TryGetValue(sprung, out string? known)
-                ? known
-                : $"trap {sprung}";
-            Console.WriteLine($"That was no keycard - a {name} sprang!");
+            Console.WriteLine($"That was no keycard - a {TrapName(sprung.TrapId)} sprang!");
         }
 
-        if (traps.Pending.Count == 0)
-            return;
+        // Anything whose moment has passed goes now, before a fresh write can
+        // hand it to a floor it was never picked up on.
+        DropStrandedTraps(memory, traps, liveFloor, current[0]);
 
-        Span<byte> request = [traps.Pending[0]];
+        if (traps.Pending.Count == 0 || traps.WriteInFlight)
+            return;
+        if (current[0] != 0)
+        {
+            // Someone else's byte (a manual poke); the stub owns it from here.
+            return;
+        }
+
+        Span<byte> request = [traps.Pending[0].TrapId];
         if (memory.TryWrite(ForcedTrapRequestAddress, request, out _))
             traps.WriteInFlight = true;
     }
+
+    /// <summary>
+    /// Drops every pending trap that is no longer on the floor it was picked
+    /// up on - the player took the elevator, walked back to town, died, or
+    /// loaded a save. If one of them owned the request byte, the byte is
+    /// cleared so the stub cannot spring it on the way out.
+    /// </summary>
+    private static void DropStrandedTraps(
+        Adap.Client.Emulators.IEmulatorMemory memory,
+        ForcedTrapQueue traps,
+        int liveFloor,
+        byte requestByte)
+    {
+        for (int index = traps.Pending.Count - 1; index >= 0; index--)
+        {
+            if (traps.Pending[index].Floor == liveFloor && liveFloor != 0)
+                continue;
+
+            PendingTrap stranded = traps.Pending[index];
+            traps.Pending.RemoveAt(index);
+            // Only the head is ever written, so only the head can be holding
+            // the byte. Clearing it is safe either way: if the stub has
+            // already taken it the byte reads 0 and this writes 0 again.
+            if (index == 0 && traps.WriteInFlight)
+            {
+                traps.WriteInFlight = false;
+                if (requestByte == stranded.TrapId)
+                {
+                    Span<byte> clear = [0];
+                    memory.TryWrite(ForcedTrapRequestAddress, clear, out _);
+                }
+            }
+            Console.WriteLine(
+                $"A {TrapName(stranded.TrapId)} picked up on floor {stranded.Floor} " +
+                "was not sprung there; it is discarded rather than carried " +
+                "onto another floor.");
+        }
+    }
+
+    private static string TrapName(byte gameTrapId) =>
+        TrapNameByGameId.TryGetValue(gameTrapId, out string? known)
+            ? known
+            : $"trap {gameTrapId}";
 
     /// <summary>
     /// The slot-data map of this world's own tower locations that hold its
@@ -365,6 +552,16 @@ internal static class AzureDreamsArchipelagoClient
                 var forcedTraps = new ForcedTrapQueue();
                 int localSlot = session.ConnectionInfo.Slot;
                 string localPlayerName = session.Players.GetPlayerAlias(localSlot) ?? slotName;
+                // Room configuration, read once. Absent reads as ON, which is
+                // both the default and the only value a room generated before
+                // the option existed could have had.
+                bool roomHasCarrierChecks = ReadSlotDataFlag(login, "carrier_system", true);
+                if (!roomHasCarrierChecks)
+                {
+                    Console.WriteLine(
+                        "This room has monster-carried checks switched off: two checks a " +
+                        "tower floor, and no carrier spawns.");
+                }
                 // Every send in the room is registered, not only the ones
                 // this slot is part of: the server broadcasts an ItemSend
                 // for each transfer, and that single stream covers local
@@ -409,6 +606,15 @@ internal static class AzureDreamsArchipelagoClient
                 var presentationTracker = new ReceivePresentationTracker();
                 uint? reportedReceiveCursor = null;
                 var checkpointCoordinator = new AzureDreamsTownCheckpointCoordinator();
+                // What escapes the world must not roll back, and what enters
+                // it must be offered again after one. Sends are handled where
+                // they are observed (NoteItemSent, below); gifts are handled
+                // here, because "delivered" lives on the Archipelago server
+                // rather than in the block a restore rewrites.
+                checkpointCoordinator.GiftWatermarkProvider =
+                    AzureDreamsGiftService.CaptureConsumedWatermark;
+                checkpointCoordinator.GiftWatermarkRestorer = watermark =>
+                    AzureDreamsGiftService.RewindConsumedWatermark(session, localSlot, watermark);
                 bool gameIdentityWasAvailable = false;
                 byte[]? lastSeedSignature = null;
                 bool restoreWaitingAnnounced = false;
@@ -439,10 +645,12 @@ internal static class AzureDreamsArchipelagoClient
                         selected = null;
                         gameSynchronizationAnnounced = false;
                         submittedChecks.Clear();
-                        // The request byte died with the emulator; the queue
-                        // head is still pending and will be rewritten on the
-                        // next attachment.
-                        forcedTraps.WriteInFlight = false;
+                        // The request byte died with the emulator, and so did
+                        // the trip every queued trap belonged to. A trap that
+                        // did not spring where it was picked up is gone - the
+                        // alternative is springing it on the first frame of
+                        // whatever floor the player loads next.
+                        forcedTraps.ForgetGameSession();
                         reportedReceiveCursor = null;
                         checkpointCoordinator.ResetGameObservation();
                         AzureDreamsReceiveState.ResetCursorObservation();
@@ -513,7 +721,8 @@ internal static class AzureDreamsArchipelagoClient
                             expectedSeedIdentity,
                             ref introWindowClosed,
                             out AzureDreamsIntroRestoreResult introRestore,
-                            out string introRestoreMessage))
+                            out string introRestoreMessage,
+                            serverCheckedLocations: session.Locations.AllLocationsChecked))
                     {
                         if (introRestoreMessage != lastIntroRestoreError)
                         {
@@ -551,10 +760,15 @@ internal static class AzureDreamsArchipelagoClient
                         checkpointCoordinator.AcceptIntroCheckpoint(expectedSeedIdentity);
                         reportedReceiveCursor = introRestored.ReceiveCursor;
                         submittedChecks.Clear();
+                        forcedTraps.ForgetGameSession();
                         Console.WriteLine(
                             $"Restored town checkpoint from {FormatCheckpointReason(introRestored.Reason)} " +
                             $"at the angel confirmation (receive cursor {introRestored.ReceiveCursor}, " +
-                            $"shop mask 0x{introRestored.ShopMask:x8}).");
+                            $"shop mask 0x{introRestored.ShopMask:x8}" +
+                            (introRestore.MergedChecks > 0
+                                ? $", {introRestore.MergedChecks} server-confirmed check{(introRestore.MergedChecks == 1 ? string.Empty : "s")} merged into the restored save"
+                                : string.Empty) +
+                            ").");
                         await Task.Delay(100, cancellationToken);
                         continue;
                     }
@@ -586,6 +800,7 @@ internal static class AzureDreamsArchipelagoClient
                             checkpointCoordinator.ResetGameObservation();
                             AzureDreamsReceiveState.ResetCursorObservation();
                             submittedChecks.Clear();
+                            forcedTraps.ForgetGameSession();
                             reportedReceiveCursor = null;
                             gameSynchronizationAnnounced = false;
                             gameIdentityWasAvailable = false;
@@ -639,8 +854,10 @@ internal static class AzureDreamsArchipelagoClient
                             seedIdentity,
                             startupObservation,
                             saveIsPristine,
+                            session.Locations.AllLocationsChecked,
                             out bool restorePending,
                             out AzureDreamsCheckpointMetadata? restoredCheckpoint,
+                            out int restoreMergedChecks,
                             out bool staleRestoreDropped,
                             out checkpointMessage))
                     {
@@ -674,10 +891,15 @@ internal static class AzureDreamsArchipelagoClient
                         restoreWaitingAnnounced = false;
                         reportedReceiveCursor = restored.ReceiveCursor;
                         submittedChecks.Clear();
+                        forcedTraps.ForgetGameSession();
                         Console.WriteLine(
                             $"Restored town checkpoint from {FormatCheckpointReason(restored.Reason)} " +
                             $"(receive cursor {restored.ReceiveCursor}, " +
-                            $"shop mask 0x{restored.ShopMask:x8}).");
+                            $"shop mask 0x{restored.ShopMask:x8}" +
+                            (restoreMergedChecks > 0
+                                ? $", {restoreMergedChecks} server-confirmed check{(restoreMergedChecks == 1 ? string.Empty : "s")} merged into the restored save"
+                                : string.Empty) +
+                            ").");
                         lastCheckpointError = null;
                         lastGameStateMessage = null;
                         // Allow the town game thread to observe the complete
@@ -815,7 +1037,8 @@ internal static class AzureDreamsArchipelagoClient
                     if (AzureDreamsTowerProgressReader.TryRead(
                             activeMemory,
                             out AzureDreamsTowerProgress towerProgress,
-                            out _))
+                            out _,
+                            roomHasCarrierChecks))
                     {
                         towerSink?.Invoke(towerProgress);
 
@@ -894,6 +1117,16 @@ internal static class AzureDreamsArchipelagoClient
                         lastReceiveError = tokenMessage;
                     }
 
+                    // The blacksmith's sands: levels, not inventory. Same
+                    // rule as keycards - the full history's count, eagerly.
+                    if (!SynchronizeTemperSands(
+                            session, activeMemory, out string sandMessage))
+                    {
+                        if (sandMessage != lastReceiveError)
+                            Console.Error.WriteLine($"Temper sand sync paused: {sandMessage}");
+                        lastReceiveError = sandMessage;
+                    }
+
                     // Traps queued by the location sync above: keep the
                     // request byte fed. The seed-page stub does the actual
                     // planting and springing at Koh's next idle tower frame.
@@ -957,7 +1190,16 @@ internal static class AzureDreamsArchipelagoClient
                     // incoming list instead of cutting ahead of items the
                     // player is already owed.
                     AzureDreamsGiftService.ProcessOutgoing(
-                        session, activeMemory, localSlot, localPlayerName);
+                        session,
+                        activeMemory,
+                        localSlot,
+                        localPlayerName,
+                        // A sent item and its token have left this world for
+                        // good, so they come off the saved checkpoint too - a
+                        // restore that gave them back would be a duplication
+                        // the recipient keeps their copy of.
+                        descriptor => checkpointCoordinator.NoteItemSent(
+                            seedIdentity, descriptor));
                     bool ordinaryQueueDrained =
                         AzureDreamsReceiveState.TryReadReceivedItemCount(
                             activeMemory, out uint drainedCursor, out _) &&
@@ -1194,6 +1436,11 @@ internal static class AzureDreamsArchipelagoClient
             .. AzureDreamsReceiveState.GetCollectedLocationIds(gameMask),
             .. AzureDreamsReceiveState.GetCollectedShopLocationIds(shopMask),
         ];
+        // What the save already held the first time this client looked at it.
+        // A check that was in there before we arrived is history - it may
+        // still need reporting, but nobody just picked it up.
+        bool trapArmingPrimed = forcedTraps.ObservedGameChecks is not null;
+        HashSet<long> observedGameChecks = forcedTraps.ObservedGameChecks ??= [];
         HashSet<long> serverChecks = session.Locations.AllLocationsChecked.ToHashSet();
         submittedChecks.RemoveWhere(serverChecks.Contains);
         long[] unsent = gameChecks
@@ -1213,12 +1460,38 @@ internal static class AzureDreamsArchipelagoClient
             // delivery: queue its spring. Locations the server already knew
             // about never reach `unsent`, which is what makes this
             // exactly-once across sessions with no journal field.
+            //
+            // But `unsent` is "the server has not heard this yet", which is
+            // NOT the same as "this just happened": a client attaching to a
+            // save with offline pickups in it reports the lot in one pass. So
+            // a trap arms only when this client watched the check appear
+            // (trapArmingPrimed and not in the baseline) AND the player is
+            // standing on a tower floor to spring it on. Anything else is a
+            // trap arriving at a moment it does not belong to - which is how
+            // one went off on the first frame of a loaded floor and spent the
+            // turn the player needed.
+            int pickupFloor = -1;
             foreach (long location in unsent)
             {
-                if (trapLocations.TryGetValue(location, out byte trapId))
-                    forcedTraps.Pending.Add(trapId);
+                if (!trapLocations.TryGetValue(location, out byte trapId))
+                    continue;
+                if (pickupFloor < 0)
+                    pickupFloor = AzureDreamsTowerProgressReader.ReadLiveTowerFloor(memory);
+                if (!IsTrapSpringable(
+                        trapArmingPrimed,
+                        observedGameChecks.Contains(location),
+                        pickupFloor,
+                        forcedTraps.FloorAtLastPoll,
+                        out string refusal))
+                {
+                    Console.WriteLine($"Trap location {location}: {refusal}.");
+                    continue;
+                }
+                forcedTraps.Pending.Add(new PendingTrap(trapId, pickupFloor));
             }
         }
+
+        observedGameChecks.UnionWith(gameChecks);
 
         if (!AzureDreamsReceiveState.TryMergeCheckedLocations(
                 memory,
@@ -1298,6 +1571,90 @@ internal static class AzureDreamsArchipelagoClient
         message = string.Empty;
         return true;
     }
+
+    /// <summary>
+    /// The sands' twin of <see cref="SynchronizeProgressiveKeycards"/>: the
+    /// count of Red Sands in the received history is the weapon temper level,
+    /// the count of Blue Sands the shield temper level, the count of White
+    /// Sands the ball charge level. Applied eagerly and idempotently to the
+    /// three level bytes; a rise is announced once. More than the maximum in
+    /// the history is rejected, not clamped.
+    /// </summary>
+    internal static bool SynchronizeTemperSands(
+        IArchipelagoSession session,
+        Adap.Client.Emulators.IEmulatorMemory memory,
+        out string message) =>
+        SynchronizeTemperSands(
+            memory,
+            session.Items.AllItemsReceived.Select(item => item.ItemId).ToArray(),
+            out message);
+
+    internal static bool SynchronizeTemperSands(
+        Adap.Client.Emulators.IEmulatorMemory memory,
+        IReadOnlyList<long> receivedItemIds,
+        out string message)
+    {
+        int redCount = receivedItemIds.Count(id => id == RedSandItemId);
+        int blueCount = receivedItemIds.Count(id => id == BlueSandItemId);
+        int whiteCount = receivedItemIds.Count(id => id == WhiteSandItemId);
+        if (redCount > AzureDreamsReceiveState.MaximumTemperLevel ||
+            blueCount > AzureDreamsReceiveState.MaximumTemperLevel ||
+            whiteCount > AzureDreamsReceiveState.MaximumTemperLevel)
+        {
+            message = $"The server history contains {redCount} Red, {blueCount} Blue and {whiteCount} White Sands; only " +
+                $"{AzureDreamsReceiveState.MaximumTemperLevel} of each are valid.";
+            return false;
+        }
+
+        if (!AzureDreamsReceiveState.TryReadTemperLevels(
+                memory, out byte weaponLevel, out byte shieldLevel, out message))
+        {
+            return false;
+        }
+        if (!AzureDreamsReceiveState.TryReadBallChargeLevel(memory, out byte chargeLevel, out message))
+            return false;
+        if (weaponLevel == redCount && shieldLevel == blueCount && chargeLevel == whiteCount)
+        {
+            message = string.Empty;
+            return true;
+        }
+
+        if (weaponLevel != redCount || shieldLevel != blueCount)
+        {
+            if (!AzureDreamsReceiveState.TrySetTemperLevels(
+                    memory, (byte)redCount, (byte)blueCount, out message))
+            {
+                return false;
+            }
+        }
+        if (chargeLevel != whiteCount &&
+            !AzureDreamsReceiveState.TrySetBallChargeLevel(memory, (byte)whiteCount, out message))
+        {
+            return false;
+        }
+        if (redCount > weaponLevel)
+            Console.WriteLine($"Received Red Sand; the smith tempers weapons to level {redCount} now.");
+        if (blueCount > shieldLevel)
+            Console.WriteLine($"Received Blue Sand; the smith tempers shields to level {blueCount} now.");
+        if (whiteCount > chargeLevel)
+        {
+            int perVisit = BallChargeUsesForLevel(whiteCount);
+            Console.WriteLine(
+                "Received White Sand; the ball charger adds " +
+                (perVisit == 1 ? "1 charge" : $"{perVisit} charges") +
+                " per town visit now.");
+        }
+        message = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// ball_charger.USES_BY_LEVEL: how many charges the charger hands out per
+    /// town visit at this level. Not a per-ball cap - the ceiling on one ball
+    /// is ten at every level.
+    /// </summary>
+    internal static int BallChargeUsesForLevel(int level) =>
+        level switch { 0 => 0, 1 => 1, 2 => 2, _ => 3 };
 
     // Any durable cursor at or above this floor is a gift sequence, not a
     // receive count: the current gift range starts at the sign bit
@@ -1897,6 +2254,18 @@ internal static class AzureDreamsArchipelagoClient
                     localPlayerName,
                     transferSink);
             }
+            else if (IsTemperSandItemId(item.ItemId))
+            {
+                // Already applied eagerly to the smith's level bytes by
+                // SynchronizeTemperSands (the sands cut the line like
+                // keycards and never enter the bag). The cursor merely
+                // catches up over it.
+                PublishReceiveTransfer(
+                    item,
+                    localSlot,
+                    localPlayerName,
+                    transferSink);
+            }
             else if (IsTrapItemId(item.ItemId))
             {
                 // Sprung (or queued to spring) by the location-check path
@@ -2163,6 +2532,26 @@ internal static class AzureDreamsArchipelagoClient
         bool ownShopLocation = locationId is >= AzureDreamsReceiveState.ShopLocationIdBase and
             < AzureDreamsReceiveState.ShopLocationIdBase + AzureDreamsReceiveState.ShopLocationCount;
         return !ownTowerLocation && !ownShopLocation;
+    }
+
+    /// <summary>
+    /// A boolean the room may or may not carry. Slot data arrives as loosely
+    /// typed JSON, so anything that is not recognisably false is taken as the
+    /// default rather than as a reason to refuse the room - the version gate
+    /// is what refuses rooms.
+    /// </summary>
+    internal static bool ReadSlotDataFlag(LoginSuccessful login, string key, bool fallback)
+    {
+        if (!login.SlotData.TryGetValue(key, out object? raw) || raw is null)
+            return fallback;
+        if (raw is bool value)
+            return value;
+        string text = raw.ToString()?.Trim() ?? string.Empty;
+        if (bool.TryParse(text, out bool parsed))
+            return parsed;
+        if (int.TryParse(text, out int number))
+            return number != 0;
+        return fallback;
     }
 
     private static bool TryValidateSlotDataVersion(LoginSuccessful login, out string message)

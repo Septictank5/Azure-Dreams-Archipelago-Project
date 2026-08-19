@@ -50,9 +50,18 @@ internal sealed class CreateYamlDialog : Form
     private readonly CheckBox _traps;
     private readonly NumericUpDown _trapChance;
     private readonly NumericUpDown _progressionBalancing;
+    private readonly CheckBox _hintSystem;
+    private readonly CheckBox _temperSystem;
+    private readonly CheckBox _carrierSystem;
     private readonly Label _validation;
 
-    public CreateYamlDialog(Size? matchSize = null)
+    /// <param name="matchSize">The main window's size, so the dialog reads as another screen of it.</param>
+    /// <param name="initialSlotName">
+    /// The slot name to open on - the connection screen's saved slot, so a
+    /// player updating their yaml finds their name already filled in. Read
+    /// only: this dialog never writes the client settings.
+    /// </param>
+    public CreateYamlDialog(Size? matchSize = null, string? initialSlotName = null)
     {
         Text = "Create YAML";
         Name = "CreateYamlDialog";
@@ -102,6 +111,9 @@ internal sealed class CreateYamlDialog : Form
             AzureDreamsPlayerYaml.MinProgressionBalancing,
             AzureDreamsPlayerYaml.MaxProgressionBalancing,
             AzureDreamsPlayerYaml.DefaultProgressionBalancing);
+        _hintSystem = CreateToggle("YamlHintSystem", AzureDreamsPlayerYaml.DefaultHintSystem);
+        _temperSystem = CreateToggle("YamlTemperSystem", AzureDreamsPlayerYaml.DefaultTemperSystem);
+        _carrierSystem = CreateToggle("YamlCarrierSystem", AzureDreamsPlayerYaml.DefaultCarrierSystem);
         _validation = new Label
         {
             Name = "YamlValidation",
@@ -133,6 +145,19 @@ internal sealed class CreateYamlDialog : Form
 
         _traps.CheckedChanged += (_, _) => _trapChance.Enabled = _traps.Checked;
         _trapChance.Enabled = _traps.Checked;
+
+        // Prefill only; the settings are never written from here. Trimmed
+        // to the cap so a stale long name does not slip past MaxLength (which
+        // only bounds typing), and validated on Save like anything typed.
+        string prefill = (initialSlotName ?? string.Empty).Trim();
+        if (prefill.Length > AzureDreamsPlayerYaml.MaxSlotNameLength)
+            prefill = prefill[..AzureDreamsPlayerYaml.MaxSlotNameLength];
+        _slotName.Text = prefill;
+        if (prefill.Length > 0)
+        {
+            _slotName.SelectionStart = prefill.Length;
+            _slotName.SelectionLength = 0;
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -140,6 +165,30 @@ internal sealed class CreateYamlDialog : Form
         if (disposing)
             _tips.Dispose();
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Draws the dialog to a PNG (`--render-yaml`), prefilled the way the
+    /// connection screen would open it, so a layout change can be LOOKED at.
+    /// </summary>
+    public static int RenderToFile(string path, string slotName, int width = 0, int height = 0)
+    {
+        Size? matched = width > 0 && height > 0 ? new Size(width, height) : null;
+        using var dialog = new CreateYamlDialog(matched, slotName);
+        dialog.StartPosition = FormStartPosition.Manual;
+        dialog.ShowInTaskbar = false;
+        dialog.Location = new Point(-30_000, -30_000);
+        dialog.Show();
+        Application.DoEvents();
+        dialog.PerformLayout();
+        dialog.Refresh();
+        Application.DoEvents();
+        using var bitmap = new Bitmap(dialog.Width, dialog.Height);
+        dialog.DrawToBitmap(bitmap, new Rectangle(0, 0, dialog.Width, dialog.Height));
+        dialog.Close();
+        bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        Console.WriteLine($"Wrote {path} ({dialog.Width}x{dialog.Height}).");
+        return 0;
     }
 
     private static Size ChooseSize(Size? matchSize)
@@ -241,15 +290,27 @@ internal sealed class CreateYamlDialog : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 4,
-            RowCount = 2,
+            RowCount = 4,
             Margin = new Padding(0, 4, 0, 0),
         };
         for (int column = 0; column < 4; column++)
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int row = 0; row < 4; row++)
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        grid.Controls.Add(FieldLabel("Traps"), 0, 0);
+        // Progression balancing leads, on a row of its own: it is the one
+        // option here that is not about Azure Dreams at all, and every room
+        // has an opinion about it.
+        grid.Controls.Add(FieldLabel("Progression balancing"), 0, 0);
+        grid.Controls.Add(
+            WithBubble(
+                _progressionBalancing,
+                "YamlHelpProgressionBalancing",
+                "Moves progression earlier so the opening drags less.\n\n" +
+                "0 disables it, 50 is normal, 99 is extreme."),
+            1, 0);
+
+        grid.Controls.Add(FieldLabel("Traps"), 0, 1);
         grid.Controls.Add(
             WithBubble(
                 _traps,
@@ -258,9 +319,9 @@ internal sealed class CreateYamlDialog : Form
                 "A trap looks like a Progressive Keycard - on the floor, in the\n" +
                 "at-feet menu and in its description - until you pick it up.\n" +
                 "Traps only ever appear in your own tower."),
-            1, 0);
+            1, 1);
 
-        grid.Controls.Add(FieldLabel("Trap chance"), 2, 0);
+        grid.Controls.Add(FieldLabel("Trap chance"), 2, 1);
         grid.Controls.Add(
             WithBubble(
                 Suffixed(_trapChance, "%"),
@@ -268,16 +329,43 @@ internal sealed class CreateYamlDialog : Form
                 "Percent chance for each ordinary item to be a trap instead.\n\n" +
                 "A trap spends a whole tower check, so a little goes a long way.\n" +
                 "Monster dens stay very rare whatever you set here."),
-            3, 0);
+            3, 1);
 
-        grid.Controls.Add(FieldLabel("Progression balancing"), 0, 1);
+        grid.Controls.Add(FieldLabel("Fortune teller hints"), 0, 2);
         grid.Controls.Add(
             WithBubble(
-                _progressionBalancing,
-                "YamlHelpProgressionBalancing",
-                "Moves progression earlier so the opening drags less.\n\n" +
-                "0 disables it, 50 is normal, 99 is extreme."),
-            1, 1);
+                _hintSystem,
+                "YamlHelpHintSystem",
+                "Mademoiselle Shiela reads a tower floor for 1000 gold.\n\n" +
+                "She looks at one of the lowest three floors that still holds\n" +
+                "un-collected checks and describes, in her own vague terms, what\n" +
+                "KIND of thing waits there and whether a monster carries it.\n" +
+                "Off: she sees nothing in the crystal."),
+            1, 2);
+
+        grid.Controls.Add(FieldLabel("Blacksmith and ball charger"), 2, 2);
+        grid.Controls.Add(
+            WithBubble(
+                _temperSystem,
+                "YamlHelpTemperSystem",
+                "Three Red, three Blue and three White Sands join the pool.\n\n" +
+                "The blacksmith tempers weapons (Red) and shields (Blue) up to\n" +
+                "+10/+20/+40; the ball charger beside the fortune teller adds\n" +
+                "1/2/3 ball charges per town visit (White). Sands never enter\n" +
+                "the bag. Off: neither NPC, no sands, floors drop them as usual."),
+            3, 2);
+
+        grid.Controls.Add(FieldLabel("Monster-carried checks"), 0, 3);
+        grid.Controls.Add(
+            WithBubble(
+                _carrierSystem,
+                "YamlHelpCarrierSystem",
+                "A third check on every tower floor, carried by a monster.\n\n" +
+                "A level-1 monster of a species that does not belong on the floor\n" +
+                "spawns, ignores you, heads for an exit, and drops the check when\n" +
+                "killed. Each floor trades one native type for it.\n" +
+                "Off: two checks a floor, 39 fewer items, vanilla rosters."),
+            1, 3);
         return grid;
     }
 
@@ -340,7 +428,10 @@ internal sealed class CreateYamlDialog : Form
             slotName,
             _traps.Checked,
             (int)_trapChance.Value,
-            (int)_progressionBalancing.Value);
+            (int)_progressionBalancing.Value,
+            _hintSystem.Checked,
+            _temperSystem.Checked,
+            _carrierSystem.Checked);
 
         using var dialog = new SaveFileDialog
         {
@@ -500,6 +591,16 @@ internal sealed class CreateYamlDialog : Form
         Text = text,
         ForeColor = PrimaryText,
         Margin = new Padding(0, 6, 16, 16),
+    };
+
+    private static CheckBox CreateToggle(string name, bool value) => new()
+    {
+        Name = name,
+        Text = "Enabled",
+        Checked = value,
+        AutoSize = true,
+        ForeColor = PrimaryText,
+        Margin = new Padding(0, 3, 0, 0),
     };
 
     private static NumericUpDown CreateSpinner(

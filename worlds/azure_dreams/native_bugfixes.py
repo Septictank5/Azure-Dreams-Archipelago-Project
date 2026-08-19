@@ -12,11 +12,14 @@ out of `Azure Dreams (Original)/Azure Dreams (USA).bin` on 2026-08-04 and each
 decodes to exactly what the fix expects to be replacing, which is the check that
 the offsets are still right for this disc revision.
 
-**These are the only edits ADAP makes to vanilla combat code.** Every other
-patch in this project is either our own code or a hook into a call site we own.
-Keep it that way: anything added here has to be a repair to a documented native
-bug, not a behaviour change, or the "is it us or the game" question stops having
-an answer.
+**These, plus `species_move_fix`, are the only edits ADAP makes to vanilla
+combat code.** Every other patch in this project is either our own code or a
+hook into a call site we own. Keep it that way: anything added here has to be a
+repair to a documented native bug, not a behaviour change, or the "is it us or
+the game" question stops having an answer. (`species_move_fix` is the one
+deliberate exception - two words in each disc copy of five species packages'
+move routines, converting them to the routine the other 39 species compile;
+its own docstring carries the measurement.)
 
 What is fixed, all three from `docs/archive/` and the derandomizer's bug list:
 

@@ -52,8 +52,14 @@ internal static class AzureDreamsMailbox
     public const int ElevatorClearanceOffset = 0x18;
     public const int GameMessageOffset = 0x40;
     public const int GameMessageSize = 0x40;
-    public const int OutstandingFloorLocationsOffset = 0x80;
-    public const int CollectedFloorLocationRequestsOffset = 0x90;
+    // +0x80 (16 B, "outstanding floor locations") and +0x90 (16 B, "collected
+    // floor-location request mirror") are RETIRED as of ADSV v4 (2026-08-15).
+    // No game code ever read either - the spawner and the collect hook read
+    // the save-backed journal itself - and the 40-byte v4 journal would not
+    // fit. The words are still zeroed by the mailbox finalizer and are left
+    // unused; nothing may reuse them without checking that finalizer.
+    public const int RetiredFloorLocationFieldsOffset = 0x80;
+    public const int RetiredFloorLocationFieldsSize = 0x1c;
     public const int ReceiveRequestSequenceOffset = 0x9c;
     public const int ReceiveDescriptorOffset = 0xa0;
     public const int ReceiveAckSequenceOffset = 0xa4;
@@ -65,10 +71,7 @@ internal static class AzureDreamsMailbox
     public const uint ReceiveStatusDelivered = 3;
     public const uint ReceiveStatusInvalid = 4;
 
-    public const int TowerFloorCount = 39;
-    public const int FloorLocationsPerFloor = 2;
-    public const int FloorLocationCount = TowerFloorCount * FloorLocationsPerFloor;
-    public const int FloorLocationMaskSize = (FloorLocationCount + 7) / 8;
+    public const int TowerFloorCount = AzureDreamsReceiveState.TowerFloorCount;
 
     private static readonly byte[] LockedElevatorMessageBytes =
     [
@@ -303,123 +306,6 @@ internal static class AzureDreamsMailbox
         }
 
         message = $"Elevator clearance is now {elevatorClearance}.";
-        return true;
-    }
-
-    public static bool TryWriteOutstandingFloorLocations(
-        IEmulatorMemory memory,
-        ReadOnlySpan<byte> locations,
-        out string message)
-    {
-        if (locations.Length != FloorLocationMaskSize)
-        {
-            message = $"The outstanding floor-location mask must be exactly {FloorLocationMaskSize} bytes.";
-            return false;
-        }
-
-        if (!TryRequireInitializedMailbox(memory, out message))
-            return false;
-
-        if (!memory.TryWrite(Address + OutstandingFloorLocationsOffset, locations, out string? writeError))
-        {
-            message = writeError ?? "Could not write the outstanding floor-location mask.";
-            return false;
-        }
-
-        Span<byte> observed = stackalloc byte[FloorLocationMaskSize];
-        if (!memory.TryRead(Address + OutstandingFloorLocationsOffset, observed, out string? readError))
-        {
-            message = readError ?? "Could not read back the outstanding floor-location mask.";
-            return false;
-        }
-
-        if (!observed.SequenceEqual(locations))
-        {
-            message = "The outstanding floor-location mask did not match on read-back.";
-            return false;
-        }
-
-        message = "Updated the client-owned outstanding floor-location mask.";
-        return true;
-    }
-
-    public static bool TrySetOutstandingFloorLocation(
-        IEmulatorMemory memory,
-        int floor,
-        int slot,
-        bool outstanding,
-        out string message)
-    {
-        if (!TryGetFloorLocationBit(floor, slot, out int byteIndex, out byte bit, out message))
-            return false;
-
-        if (!TryRequireInitializedMailbox(memory, out message))
-            return false;
-
-        byte[] locations = new byte[FloorLocationMaskSize];
-        if (!memory.TryRead(Address + OutstandingFloorLocationsOffset, locations, out string? readError))
-        {
-            message = readError ?? "Could not read the outstanding floor-location mask.";
-            return false;
-        }
-
-        if (outstanding)
-            locations[byteIndex] |= bit;
-        else
-            locations[byteIndex] &= unchecked((byte)~bit);
-
-        if (!TryWriteOutstandingFloorLocations(memory, locations, out message))
-            return false;
-
-        message = $"Floor {floor} location slot {slot} is now {(outstanding ? "outstanding" : "cleared")}.";
-        return true;
-    }
-
-    public static bool TryReadOutstandingFloorLocations(
-        IEmulatorMemory memory,
-        Span<byte> locations,
-        out string message)
-    {
-        if (locations.Length != FloorLocationMaskSize)
-        {
-            message = $"The outstanding floor-location mask must be exactly {FloorLocationMaskSize} bytes.";
-            return false;
-        }
-
-        if (!TryRequireInitializedMailbox(memory, out message))
-            return false;
-
-        if (!memory.TryRead(Address + OutstandingFloorLocationsOffset, locations, out string? readError))
-        {
-            message = readError ?? "Could not read the outstanding floor-location mask.";
-            return false;
-        }
-
-        message = string.Empty;
-        return true;
-    }
-
-    public static bool TryReadCollectedFloorLocationRequests(
-        IEmulatorMemory memory,
-        Span<byte> requests,
-        out string message)
-    {
-        if (requests.Length != FloorLocationMaskSize)
-        {
-            message = $"The collected floor-location request mask must be exactly {FloorLocationMaskSize} bytes.";
-            return false;
-        }
-
-        if (!TryRequireInitializedMailbox(memory, out message))
-            return false;
-
-        if (!memory.TryRead(Address + CollectedFloorLocationRequestsOffset, requests, out string? readError))
-        {
-            message = readError ?? "Could not read the collected floor-location request mask.";
-            return false;
-        }
-
-        message = string.Empty;
         return true;
     }
 
@@ -892,34 +778,6 @@ internal static class AzureDreamsMailbox
         ReceiveStatusInvalid => "invalid descriptor",
         _ => $"unknown ({status})",
     };
-
-    public static bool TryGetFloorLocationBit(
-        int floor,
-        int slot,
-        out int byteIndex,
-        out byte bit,
-        out string message)
-    {
-        byteIndex = 0;
-        bit = 0;
-        if (floor is < 1 or > TowerFloorCount)
-        {
-            message = $"Tower floor must be between 1 and {TowerFloorCount}.";
-            return false;
-        }
-
-        if (slot is < 0 or >= FloorLocationsPerFloor)
-        {
-            message = $"Floor-location slot must be between 0 and {FloorLocationsPerFloor - 1}.";
-            return false;
-        }
-
-        int index = (floor - 1) * FloorLocationsPerFloor + slot;
-        byteIndex = index >> 3;
-        bit = (byte)(1 << (index & 7));
-        message = string.Empty;
-        return true;
-    }
 
     private static bool TryRequireInitializedMailbox(IEmulatorMemory memory, out string message)
     {

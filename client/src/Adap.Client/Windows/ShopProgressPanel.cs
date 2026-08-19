@@ -46,6 +46,7 @@ internal sealed class ShopProgressPanel : Panel
     private AzureDreamsTowerProgress _progress = new(new byte[10], 0, 0, 0);
     private bool _hasProgress;
     private double _scale = UiScale.Natural;
+    private bool _live = true;
 
     public ShopProgressPanel()
     {
@@ -53,6 +54,20 @@ internal sealed class ShopProgressPanel : Panel
         ResizeRedraw = true;
         BackColor = Color.FromArgb(15, 27, 46);
         MinimumSize = new Size(PreferredWidth, PreferredHeight);
+    }
+
+    /// <summary>See <see cref="PanelDimming"/>.</summary>
+    public bool Live
+    {
+        get => _live;
+        set
+        {
+            if (_live == value)
+                return;
+
+            _live = value;
+            Invalidate();
+        }
     }
 
     /// <summary>See <see cref="UiScale"/>.</summary>
@@ -192,7 +207,7 @@ internal sealed class ShopProgressPanel : Panel
                 using (var pen = new Pen(border))
                     g.DrawRectangle(pen, cell);
                 if (image is not null)
-                    g.DrawImage(image, cell);
+                    PanelDimming.DrawIcon(g, image, cell, _live);
             }
             rowTop += RowHeight + RowGap;
         }

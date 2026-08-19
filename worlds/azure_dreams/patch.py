@@ -101,7 +101,9 @@ SEED_MAGIC = 0x4453_4441  # "ADSD" in little-endian memory
 # keycard masks, the journal - is at unchanged offsets, and the paged text is
 # game-side only. See FLOOR_PAGE_WINDOW_OFFSET below.
 SEED_VERSION = 3
-LOCATION_COUNT = 78
+# 117 = 39 floors x MARKER_SLOT_COUNT. Two are placed on the floor; the third
+# is carried by that floor's forced monster spawn.
+LOCATION_COUNT = 117
 
 # --- the AP marker descriptor -------------------------------------------------
 #
@@ -115,33 +117,146 @@ LOCATION_COUNT = 78
 #
 # Quality carries the floor's check slot. It never renders, because status bit
 # 0x80 is the game's *unidentified* flag and `append_item_display_name` skips
-# the `+N` modifier for unidentified items. Status 0xAD is otherwise reserved.
+# the `+N` modifier for unidentified items.
+#
+# **0x8D, not 0xAD (2026-08-15).** The status was 0xAD from the first marker,
+# and bit 0x20 of the flags byte is the game's *equipped* bit. On a ground
+# marker that only ever printed "was taken off" on pickup; on the carrier's
+# marker it was fatal - the death drop at 0x800AD24C skips any carried item
+# with 0x20 set (that is how a Troll keeps its bow gun), so the first ride's
+# carriers held the check and never dropped it. 0x8D is 0xAD minus that bit
+# and nothing else: still unidentified, still a value no real item carries.
+# Every emitter derives from this constant; the two binary compares in the
+# gameplay payload are rewritten by tools/Rebuild-AdapGameplayPayload.py.
 MARKER_ID = 0x01
 MARKER_CATEGORY = 0x0B
-MARKER_STATUS = 0xAD
-MARKER_SLOT_COUNT = 2
+MARKER_STATUS = 0x8D
+assert not MARKER_STATUS & 0x20, "the equipped bit suppresses the carrier's death drop"
+assert MARKER_STATUS & 0x80, "the unidentified bit hides the slot byte from the name"
+MARKER_SLOT_COUNT = 3
+# How the three slots are delivered: the payload's spawner places slots
+# 0..MARKER_GROUND_SLOT_COUNT-1 on the floor; the carrier monster holds
+# MARKER_CARRIER_SLOT and drops it on death (docs/game/monster-ai.md).
+MARKER_GROUND_SLOT_COUNT = 2
+MARKER_CARRIER_SLOT = 2
+assert MARKER_GROUND_SLOT_COUNT + 1 == MARKER_SLOT_COUNT
+assert MARKER_CARRIER_SLOT == MARKER_GROUND_SLOT_COUNT
+
+
+def marker_descriptor_word(slot: int) -> int:
+    """The four-byte AP marker `[id, category, slot, status]` as one LE word."""
+
+    if slot not in range(MARKER_SLOT_COUNT):
+        raise ValueError(f"marker slot {slot} out of range")
+    return MARKER_ID | (MARKER_CATEGORY << 8) | (slot << 16) | (MARKER_STATUS << 24)
 
 REMOTE_LOCATION_MASK_OFFSET = 0x10
 FLOOR_KEYCARD_MASK_OFFSET = 0x20
 ELEVATOR_RETURN_DESCRIPTOR_OFFSET = 0x28
 ELEVATOR_RETURN_REQUEST_OFFSET = 0x2C
 
-PERSISTENT_STATE_ADDRESS = 0x8001_5FC0
+PERSISTENT_STATE_ADDRESS = 0x8001_5F94
 PERSISTENT_STATE_MAGIC = 0x5653_4441  # "ADSV" in little-endian memory
-# 3 (2026-08-05): the gold-granted counter at +0x28 - how many 5000-gold
-# packages this save has banked. It is what lets gold cut the delivery line
-# the way keycards do: eager granting needs a durable count to reconcile
-# against the history, because gold is cumulative and cannot be re-derived
-# the way a clearance level can. Version 2 saves re-initialize on first boot
-# of a version 3 build; pre-release, with rooms regenerated per build, that
-# costs nothing. The record still fits the reserved 0x40-byte save tail.
-PERSISTENT_STATE_VERSION = 3
-PERSISTENT_STATE_SIZE = 0x2C
+# 3 (2026-08-05): the gold-granted counter - how many 5000-gold packages this
+# save has banked. It is what lets gold cut the delivery line the way keycards
+# do: eager granting needs a durable count to reconcile against the history,
+# because gold is cumulative and cannot be re-derived the way a clearance level
+# can.
+# 4 (2026-08-15, the third floor check): the 10-byte packed tower mask becomes
+# a 40-byte one-byte-per-floor journal, the separate 4-byte shop mask becomes
+# the 16-byte town half of one unified location mask, the two intro-handshake
+# bytes that squatted in the old mask's slack (+0x1A/+0x1B) get a field of
+# their own, and the block moved DOWN to make room. Version 3 saves
+# re-initialize on first boot; pre-release, with rooms regenerated per build,
+# that costs nothing.
+#
+# **Down, not up.** The 64 bytes above `0x8001_5FC0` are fully allocated - ADSV,
+# the shortcut carrier, the send-token trio, one spare word - and growing up is
+# what burned 0.9.84. `0x8001_5F00..0x8001_5FBF` was 192 free bytes below (the
+# bonus-floor state that once lived there moved to `0x801FF000`), so the base
+# drops to `0x8001_5F94` at size `0x58` and ADSV still **ends** at
+# `0x8001_5FEC`. Nothing above it moves. 148 bytes remain free below.
+#
+# Layout (docs/systems/third-floor-check.md §2 owns the table):
+#   +0x00 magic            +0x04 version:size (lo/hi halves)
+#   +0x08 seed signature   +0x10 tower journal, 40 B, byte = floor-1, bit = slot
+#   +0x38 town journal, 16 B packed (bit = town check index)
+#   +0x48 received count   +0x4C keycard level      +0x50 gold granted
+#   +0x54 intro restore marker (byte)  +0x55 first-run ready (byte)  +0x56 spare
+PERSISTENT_STATE_VERSION = 4
+PERSISTENT_STATE_SIZE = 0x58
 PERSISTENT_LOCATION_MASK_OFFSET = 0x10
-PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET = 0x1C
-PERSISTENT_KEYCARD_LEVEL_OFFSET = 0x20
-PERSISTENT_SHOP_MASK_OFFSET = 0x24
-PERSISTENT_GOLD_GRANTED_OFFSET = 0x28
+# **One byte per floor, bit = slot.** Not a packed bit array. Every emitter that
+# touches the journal used to compute `(floor - 1) * slots + slot` into a bit
+# index and then split that into a byte and a bit - arithmetic that is unrolled
+# in MIPS and therefore does NOT follow MARKER_SLOT_COUNT. Raising the count
+# from two to three on 2026-08-15 silently broke the put-in guard's bound
+# because of it. A byte per floor removes the multiply *and* the split: the byte
+# index is `floor - 1` and the bit is the slot. Fewer instructions than before,
+# at every site, and it cannot drift when the slot count changes again.
+#
+# Ceiling: 8 checks per floor, 39 floors = 312. We will not approach it.
+PERSISTENT_TOWER_MASK_BYTES = 40        # 39 floors, one byte each, one spare
+PERSISTENT_TOWER_MASK_FLOORS = 39
+PERSISTENT_TOWN_MASK_BYTES = 16         # 128 town checks, bit-packed
+PERSISTENT_LOCATION_MASK_BYTES = PERSISTENT_TOWER_MASK_BYTES + PERSISTENT_TOWN_MASK_BYTES
+# The town half of the unified mask. Still called the shop mask because the shop
+# is its only tenant today; it is no longer a separate field.
+PERSISTENT_SHOP_MASK_OFFSET = PERSISTENT_LOCATION_MASK_OFFSET + PERSISTENT_TOWER_MASK_BYTES
+PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET = 0x48
+PERSISTENT_KEYCARD_LEVEL_OFFSET = 0x4C
+PERSISTENT_GOLD_GRANTED_OFFSET = 0x50
+# The intro-restore handshake's two one-byte flags (town_receive owns their
+# meaning). They lived at +0x1A/+0x1B - the slack after the old 10-byte mask -
+# which the 40-byte journal now covers, so they have a word of their own.
+PERSISTENT_INTRO_RESTORE_MARKER_OFFSET = 0x54
+PERSISTENT_INTRO_FIRST_RUN_READY_OFFSET = 0x55
+# The blacksmith's two temper levels (0..3 each), the two spare bytes of the
+# intro-flags word: how far the equipment-shop smith may temper a WEAPON
+# (swords, the Trained Wand) and a SHIELD - cap = blacksmith.CAP_BY_LEVEL[level]
+# (0/10/20/40). Zeroed with the word at init. Raised by the client from the
+# received-item history: every Red Sand is one weapon level, every Blue Sand
+# one shield level (they never enter the bag) - docs/systems/blacksmith.md.
+PERSISTENT_WEAPON_TEMPER_LEVEL_OFFSET = 0x56
+PERSISTENT_SHIELD_TEMPER_LEVEL_OFFSET = 0x57
+# The ball charger's level (0..3, one per White Sand received; how many charges
+# she will add PER TOWN VISIT - docs/systems/fortune-teller.md section 5). NOT
+# inside ADSV: the record is full and growing it re-initializes every save (the
+# send-token trio sits beside ADSV for the same reason). The word immediately
+# below the base, in the free durable run `0x80015F00..0x80015F93`; byte 0 is
+# the level, byte 1 is how many of this visit's charges are already spent, the
+# other two are spare.
+# Both ADSV initializers zero it with the record (`_emit_persistent_state_zero_loop`)
+# and the client writes it eagerly from the received history like the two
+# temper levels. Any future ADSV growth (base moving down) absorbs it.
+BALL_CHARGE_LEVEL_ADDRESS = PERSISTENT_STATE_ADDRESS - 4
+# Charges bought at the charger since the last time Koh was in the tower. The
+# allowance is per TOWN VISIT, so the counter is reset by the tower floor
+# bootstrap helper - the same every-floor write that clears the shortcut
+# carrier - rather than by anything in town: a player who walks in and out of
+# her building keeps spending the same allowance, and one climb refills it.
+BALL_CHARGE_USED_ADDRESS = BALL_CHARGE_LEVEL_ADDRESS + 1
+assert BALL_CHARGE_USED_ADDRESS < PERSISTENT_STATE_ADDRESS
+PERSISTENT_STATE_END_ADDRESS = PERSISTENT_STATE_ADDRESS + PERSISTENT_STATE_SIZE
+assert PERSISTENT_STATE_END_ADDRESS == 0x8001_5FEC, (
+    "ADSV's END is what the tenants above it (shortcut carrier, send tokens) "
+    "are laid out against; grow it downward by moving the base."
+)
+assert PERSISTENT_STATE_ADDRESS >= 0x8001_5F00, "ADSV left the save-backed span."
+assert PERSISTENT_SHOP_MASK_OFFSET % 4 == 0, "The town half must stay word-aligned."
+assert (
+    PERSISTENT_LOCATION_MASK_OFFSET + PERSISTENT_LOCATION_MASK_BYTES
+    <= PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET
+), "The unified location mask overruns the received-item count."
+assert PERSISTENT_INTRO_FIRST_RUN_READY_OFFSET < PERSISTENT_STATE_SIZE
+# Everything the initializer zeroes, as whole words: the two journals, the
+# three counters and the intro flags. Magic, version and signature are written
+# explicitly.
+PERSISTENT_ZEROED_WORD_OFFSETS = tuple(
+    range(PERSISTENT_LOCATION_MASK_OFFSET, PERSISTENT_STATE_SIZE, 4)
+)
+assert PERSISTENT_KEYCARD_LEVEL_OFFSET in PERSISTENT_ZEROED_WORD_OFFSETS
+assert PERSISTENT_INTRO_RESTORE_MARKER_OFFSET & ~3 in PERSISTENT_ZEROED_WORD_OFFSETS
 
 SEED_INIT_ADDRESS = SEED_BLOCK_ADDRESS + 0x40
 APPEND_LOCATION_MESSAGE_ADDRESS = SEED_BLOCK_ADDRESS + 0x140
@@ -197,28 +312,33 @@ FLOOR_PAGE_MAGIC = 0x5046_4441          # "ADFP" in little-endian memory
 FLOOR_PAGE_VERSION = 1
 FLOOR_PAGE_HEADER_OFFSET = 0x540        # magic u32, floor u16, version u16
 FLOOR_PAGE_RECORDS_OFFSET = 0x548       # 2 x (item slot, player slot, form)
-FLOOR_PAGE_FRAGMENTS_OFFSET = 0x550     # five fixed 12-byte fragment slots
+FLOOR_PAGE_FRAGMENTS_OFFSET = 0x554     # five fixed 12-byte fragment slots
 FLOOR_PAGE_FRAGMENT_SLOT_SIZE = 0x0C
 # An Archipelago slot name is capped at 16 characters upstream, so a player
 # slot never truncates: 16 full-width chars * 2 B + terminator, rounded to
 # the Send row's proven 0x24.
-FLOOR_PAGE_PLAYER_SLOTS_OFFSET = 0x590  # 2 x 0x24
+FLOOR_PAGE_PLAYER_SLOTS_OFFSET = 0x590  # 3 x 0x24
 FLOOR_PAGE_PLAYER_SLOT_SIZE = 0x24
-FLOOR_PAGE_PLAYER_SLOT_COUNT = 2
+FLOOR_PAGE_PLAYER_SLOT_COUNT = 3
 # Item names are whatever the multiworld produced and DO truncate, on encoded
 # bytes (a full-width glyph is 2 B), never mid-glyph. The 25-character budget
 # is inherited from the paging design note; the tower dialogue column width
 # has not been measured empirically - revisit after a ride with long names.
-FLOOR_PAGE_ITEM_SLOTS_OFFSET = 0x5D8    # 2 x 0x38
+FLOOR_PAGE_ITEM_SLOTS_OFFSET = 0x5FC    # 3 x 0x38
 FLOOR_PAGE_ITEM_SLOT_SIZE = 0x38
-FLOOR_PAGE_COMPOSER_OFFSET = 0x650      # composer body, reached by a trampoline
+FLOOR_PAGE_COMPOSER_OFFSET = 0x6A8      # composer body, reached by a trampoline
 FLOOR_PAGE_COMPOSER_ADDRESS = SEED_BLOCK_ADDRESS + FLOOR_PAGE_COMPOSER_OFFSET
-FLOOR_PAGE_COMPOSER_CAPACITY = 0x150
-# 0x7A0..0xD40 (1,440 B) is the window's free static space - the reclaimed
-# room this design exists to produce. Claim from FLOOR_PAGE_FREE_OFFSET.
-# First tenant (2026-08-09): the forced-trap stub at 0x7A0 (see
-# FORCED_TRAP_STUB_OFFSET below); free space now starts at its end.
-FLOOR_PAGE_FREE_OFFSET = 0x7A0
+# 0x138 (2026-08-15, was 0x150): the composer is 312 bytes and the 24 spare
+# were the cheapest room in the window for the carrier's awake call - every
+# tenant after this offset is derived, so trimming the reservation repacked
+# the forced-trap stub, the send-token block and the carrier region down 24
+# bytes with one constant. The build asserts the body fits.
+FLOOR_PAGE_COMPOSER_CAPACITY = 0x138
+# 0x7E0..0xD40 is the window's free static space - the reclaimed room this
+# design exists to produce. Claim from FLOOR_PAGE_FREE_OFFSET. First tenant
+# (2026-08-09): the forced-trap stub (see FORCED_TRAP_STUB_OFFSET below); free
+# space now starts at its end.
+FLOOR_PAGE_FREE_OFFSET = FLOOR_PAGE_COMPOSER_OFFSET + FLOOR_PAGE_COMPOSER_CAPACITY
 # The per-floor page loader lives OUTSIDE the window (the read must never
 # rewrite the routine that is waiting on it, identical bytes or not).
 FLOOR_PAGE_LOADER_OFFSET = 0xD40
@@ -423,11 +543,71 @@ RECEIVE_HOOK_ORIGINAL_WORD = 0x0C07_66DC  # jal 0x801D9B70
 # exactly like the composer.
 FORCED_TRAP_STUB_OFFSET = FLOOR_PAGE_FREE_OFFSET
 FORCED_TRAP_STUB_ADDRESS = SEED_BLOCK_ADDRESS + FORCED_TRAP_STUB_OFFSET
-FORCED_TRAP_STUB_CAPACITY = 0x300
+# Trimmed 0x300 -> 0x2B0 on 2026-08-14. The stub assembles to 0x2A8; the live
+# seed block showed 88 zero bytes at +0xA48 and the tower had nowhere else to go.
+# Everything after this in the page is derived from it, so the trim moves the
+# send-token block and the floor-page free space down together - which is the
+# point: it returns 80 bytes to FLOOR_PAGE free static. Keep >= 0x2A8.
+FORCED_TRAP_STUB_CAPACITY = 0x2B0
 assert FORCED_TRAP_STUB_OFFSET + FORCED_TRAP_STUB_CAPACITY <= FLOOR_PAGE_WINDOW_END
 # Koh's action-state offset and the ordinary-idle id, shared with the receive
 # dispatcher's guard (Rebuild-AdapGameplayPayload.py documents why 0x17, the
 # post-fidget idle, is deliberately NOT accepted).
+# --- the forced trap while Koh has something in hand -------------------------
+#
+# Reported from play 2026-08-18: a trap picked up while HOLDING an item (the
+# front menu's Have verb, or a lifted monster) did not spring until the item
+# left his hands. The obvious reading - "the idle-state guard is too strict" -
+# is wrong, and worth writing down because it cost an afternoon: the guard
+# passes. What actually happens is that the game swaps Koh's control handler.
+#
+#   * `player_control_on_foot` (0x8008ACDC) is the state-0x0E handler, and it
+#     is the ONLY function containing the receive dispatcher's call site at
+#     0x8008AEB8 - which is where the forced-trap stub is interposed.
+#   * While `unit+0x1C & 0x100000` is set (something in hand; the held object
+#     is at `unit+0x124`, the descriptor at 0x80081484 - see
+#     `cancel_pending_in_hand_item`), the handler at `unit+0x8C` is
+#     `player_control_carrying` (0x8008EAC8) instead: an almost line-for-line
+#     twin with no such call. It even forces `+0x9A = 0x0E` at its top, so the
+#     action-state guard would have passed if anything had reached it.
+#
+# So the stub never ran, and the request byte sat pending until Koh put the
+# item down. The same accident is why INCOMING ITEMS pause while holding -
+# emergent behaviour, not a designed rule, and one the player likes (a full
+# bag can hold an item out, take a floor item with Put in, and let the
+# delivery land afterwards). Keeping it is the whole reason this trampoline
+# checks the request byte itself instead of just calling the stub: the stub's
+# no-request path tail-jumps to the receive dispatcher, and reaching THAT from
+# here would start delivering items into a held hand.
+#
+# The hook is the carrying handler's exact analogue of the on-foot site: same
+# position in the frame (past the hit-reaction, suspend, sleep and level-up
+# gates), `s1` still Koh's actor, and a `nop` already in the delay slot.
+#
+#   0x8008ECCC  lhu v0,0x2(s0)   <- becomes `jal trampoline`; s0 = 0x80083460
+#   0x8008ECD0  nop              <- the jal's delay slot, unchanged
+#   0x8008ECD4  andi v0,v0,0x4   <- what the trampoline returns to
+#
+# The displaced load is reproduced absolutely (s0 is set at 0x8008EB84 and
+# never rewritten before the site), so the trampoline depends on no register
+# but its own.
+#
+# Resident home: the SDK's dead RCS stamp `"$Id: bios.c,v 1.86 ..."` at
+# 0x80033578, 52 bytes of .rdata whose only reference is its own unreferenced
+# `rcsid` pointer at 0x8007B1A8 - the same donor class as the intr.c string
+# under BANK_B_CANARY_TEST, and SLUS-resident, so it is present whether or not
+# an overlay is loaded. It is only ever REACHED from tower code, and it only
+# calls into the seed page when the request byte is nonzero, which the client
+# only ever writes during a tower trip.
+CARRYING_TRAP_TRAMPOLINE_ADDRESS = 0x8003_3578
+CARRYING_TRAP_TRAMPOLINE_CAPACITY = 52
+CARRYING_TRAP_TRAMPOLINE_DONOR_PREFIX = b"$Id: bios.c,v 1.86"
+CARRYING_TRAP_HOOK_ADDRESS = 0x8008_ECCC
+CARRYING_TRAP_HOOK_ORIGINAL_WORD = 0x9602_0002   # lhu v0,0x2(s0)
+CARRYING_TRAP_RETURN_ADDRESS = 0x8008_ECD4
+# What the displaced load reads: the halfword at s0+2, s0 = 0x80083460.
+CARRYING_TRAP_DISPLACED_ADDRESS = 0x8008_3462
+
 ACTOR_ACTION_STATE_OFFSET = 0x9A
 ACTOR_ACTION_STATE_IDLE = 0x0E
 ACTOR_HEIGHT_OFFSET = 0x88
@@ -992,6 +1172,227 @@ LEVEL_MONSTERS_ADDRESS = 0x800A_08A0
 LEVEL_MONSTERS_CALL_DUNGEON_OFFSETS = (0xBB6C8, 0xC12B0, 0xC12D8)
 DUNGEON_BIN_BASE_LBA = 12_310
 
+# --- TEMPORARY EXPERIMENT (2026-08-14): recolour every monster that spawns -----
+#
+# Throwaway probe of the medal Picket's appearance store, to be deleted once it
+# has answered its question. `roll_carried_item` (`0x800A9230`, the routine that
+# fills a unit's carried-item slot at spawn) turns the floor-25 medal Picket
+# white with a single `sh 0x000C, 0x12([unit-0x14])` at `0x800A92E0`, buried at
+# the bottom of the medal's gate chain. This overwrites that routine's Picket
+# species test with the same three words, so every monster the spawner creates
+# takes the store:
+#
+#     0x800A9244  lw    v1, -0x14(s0)      ; the unit's actor record
+#     0x800A9248  addiu v0, zero, 0x000C
+#     0x800A924C  sh    v0, 0x12(v1)
+#
+# They are copied verbatim from `0x800A92D8`..`0x800A92E0`, so the probe cannot
+# mis-encode the thing it is testing. `v0`/`v1` are scratch at this point and the
+# `lw` load delay is covered by the `addiu`.
+#
+# One on-disc site, not two: `DUNGEON_GAMEPLAY_OVERLAY.bin` and
+# `TOWER_GAMEPLAY_OVERLAY_80088760.bin` are overlapping slices of the same
+# `DUNGEON.BIN` bytes (both deltas `0x88760`), so
+# `DUNGEON.BIN offset = runtime - 0x80000000 + 0x1A8A0`. **Measured**: the disc
+# words at `+0xC3AE4` are the `92030013 24020020 14620026` this replaces.
+#
+# Side effect, accepted for a probe: losing the species test drops every monster
+# into the latch/floor/story chain, which still bottoms out at the floor-25 test
+# everywhere else. On floor 25 with Watta's quest live, the first monster spawned
+# would carry the water medal whatever species it is.
+#
+# What it answers: whether `+0x12` of the actor record is an appearance field at
+# all, and whether `0x0C` reads as "white" on species other than Picket. **A
+# crash is a real result** - it means `[unit-0x14]` is not reliably populated by
+# the time the roll runs, which the design in `docs/game/floor-generation.md`
+# would have to route around.
+MONSTER_RECOLOUR_EXPERIMENT = False  # answered 2026-08-14; left off, not deleted
+MONSTER_RECOLOUR_DUNGEON_OFFSET = 0xC3AE4
+MONSTER_RECOLOUR_WORDS = (0x8E03_FFEC, 0x2402_000C, 0xA462_0012)
+
+# --- TEMPORARY EXPERIMENT (2026-08-14): give every enemy Picket's AI ----------
+#
+# Second throwaway probe, same spirit as the recolour one. Monster behaviour is
+# dispatched through a 36-entry jump table at `0x80089088`, indexed
+# `species - 9`, covering species `0x09`..`0x2C` (`docs/game/monster-ai.md` §1).
+# This overwrites every entry with Picket's handler `0x800AEFEC`, so every enemy
+# runs Picket's logic: no held item -> a once-ever 50/50 thief latch and a steal
+# when it faces Koh; holding something -> the exit-seeking branch that ignores
+# Koh inside a room.
+#
+# **Pure data. No instruction is touched**, which is why this is worth doing
+# before any of the carrier machinery: it tests the one thing that machinery
+# cannot be designed around, and it cannot fail to assemble.
+#
+# What it answers, in order of how much it would cost to learn later:
+#   1. Does Picket's steal/flee animation survive on a sprite that is not a
+#      Picket? The user's stated concern, and the reason to test it broadly
+#      rather than on one unit.
+#   2. Does the exit-seeking branch read as "ignores Koh, heads for a door" on
+#      arbitrary species, or does it degrade into something unreadable?
+#   3. Does any of it crash.
+#
+# Species below 9 and above 0x2C bypass the table entirely, so Koh (0) and the
+# scripted actors (Ghosh 0x31, Selfi 0x32, Beldo 0x38) are untouched by
+# construction. Species 9-0x2C that are *collared familiars* would be covered,
+# but they carry the player-side flag `unit+0x14` bit 0x4000 and are expected not
+# to reach this dispatch at all - **unverified**, and worth watching for.
+#
+# DELETE THIS BLOCK AND THE FLAG once the answer is recorded.
+PICKET_AI_EXPERIMENT = False  # answered 2026-08-14; left off, not deleted
+PICKET_AI_TABLE_DUNGEON_OFFSET = 0xA3928          # RAM 0x80089088
+PICKET_AI_TABLE_ENTRIES = 36
+PICKET_AI_HANDLER_ADDRESS = 0x800A_EFEC           # Picket's handler
+
+# --- TESTING (2026-08-15): the bank-B tail canary -----------------------------
+#
+# Delete this whole section AND the matching `if BANK_B_CANARY_TEST:` block in
+# build_player_ppf to stop it carrying into new seeds. Nothing else refers to
+# it. Setting the flag False has the same effect for one generation.
+#
+# The question (docs/game/tower-space-census.md section 4): the GPU display
+# list is two constant-placed banks, A at 0x801C9E40 and B at 0x801DA714, each
+# 0x108D4 long, alternating frames. ADAP's certified window - the seed page and
+# the retracted-carve block, 0x801D7F00..0x801DA700 - is bank A's tail from
+# offset 0xE0C0. Bank B's tail from the SAME offset is
+# 0x801E87D4..0x801EAFD4: same size, same distance past the same measured
+# peak (bank A wrote to 0x801D7548 and bank B to 0x801E7E40 on floor 40 under
+# mix magic), same distance below the game's own per-bank cursor limit
+# (bank + 0xEF3A). Nobody has ever stamped it. If it survives, it is ~10 KB of
+# persistent RAM with an argument identical to the one the seed page rests on.
+#
+# The test behaves exactly like a real tenant would: a 44-byte resident
+# routine, hooked off the once-per-boot init's return, fills the region with
+# 0xFF and never touches it again. Then play - floor 40 mix magic is the
+# stressor that matters. Read the answer with
+# `py -3 tools/Check-AdapBankBCanary.py <ram dump>`: any non-FF byte is a
+# game write, a crash at boot or first tower entry means the game
+# initialises something there. All-FF after the stressor set is the
+# certification; a real tenant then replaces the FFs and moves the stamp
+# into its own init.
+#
+# Resident home: the SDK's RCS stamp `"$Id: intr.c,v 1.76 ..."` at
+# 0x800332C8 (52 bytes of .rdata), referenced only by its own dead `rcsid`
+# pointer variable at 0x8007AD90 - the same donor class as the PushMatrix
+# diagnostic string under the resident validator at 0x8007BEF0. Hook: the
+# `jr ra` closing initialize_game_systems_and_display_banks (0x8003D5A4,
+# called once from main; the same routine that stores the two bank limits)
+# becomes `j stub`, its delay slot untouched; the stub ends with `jr ra`. It
+# clobbers a0/a1/v0 only - all caller-saved, and the function returns void.
+# Neither site is covered by a base-patch record (checked 2026-08-15).
+BANK_B_CANARY_TEST = True
+BANK_B_CANARY_START = 0x801E_87D4   # bank B + 0xE0C0, the seed page's offset
+BANK_B_CANARY_END = 0x801E_AFD4     # bank B + 0x108C0, exclusive; 0x14 short of the actor pool
+BANK_B_CANARY_FILL_WORD = 0xFFFF_FFFF
+BANK_B_CANARY_STUB_ADDRESS = 0x8003_32C8
+BANK_B_CANARY_STUB_CAPACITY = 52
+BANK_B_CANARY_STUB_ORIGINAL_PREFIX = b"$Id: intr.c,v 1.76"
+BANK_B_CANARY_HOOK_ADDRESS = 0x8003_D758
+BANK_B_CANARY_HOOK_ORIGINAL_WORD = 0x03E0_0008   # jr ra
+assert BANK_B_CANARY_START % 4 == 0 and BANK_B_CANARY_END % 4 == 0
+assert BANK_B_CANARY_END - BANK_B_CANARY_START == 0x2800
+assert BANK_B_CANARY_END <= 0x801E_AFE8  # the actor pool starts here
+
+
+def build_bank_b_canary_stub() -> bytes:
+    """Fill [START, END) with the sentinel word, then return to the hooked caller.
+
+        lui   a0, hi(START)     ; a0 = cursor
+        ori   a0, a0, lo(START)
+        lui   a1, hi(END)       ; a1 = end (exclusive)
+        ori   a1, a1, lo(END)
+        addiu v0, zero, -1      ; the sentinel
+    loop:
+        sw    v0, 0(a0)
+        addiu a0, a0, 4
+        bne   a0, a1, loop
+        nop
+        jr    ra
+        nop
+    """
+
+    b = _MipsBuilder()
+    b.emit(
+        _i(0x0F, 0, 4, BANK_B_CANARY_START >> 16),
+        _i(0x0D, 4, 4, BANK_B_CANARY_START & 0xFFFF),
+        _i(0x0F, 0, 5, BANK_B_CANARY_END >> 16),
+        _i(0x0D, 5, 5, BANK_B_CANARY_END & 0xFFFF),
+        _i(0x09, 0, 2, -1),
+    )
+    b.label("loop")
+    b.emit(_i(0x2B, 4, 2, 0), _i(0x09, 4, 4, 4))
+    b.branch(0x05, 4, 5, "loop")
+    b.emit(0, 0x03E0_0008, 0)
+    stub = b.build()
+    if len(stub) > BANK_B_CANARY_STUB_CAPACITY:
+        raise ValueError(
+            f"The bank-B canary stub is {len(stub)} bytes; the RCS string is "
+            f"{BANK_B_CANARY_STUB_CAPACITY}."
+        )
+    return stub
+
+
+def iter_bank_b_canary_slus_file_patches() -> tuple[tuple[int, bytes], ...]:
+    """(SLUS file offset, bytes) for the stub and the hook. Empty when off."""
+
+    if not BANK_B_CANARY_TEST:
+        return ()
+    from . import save_removal
+
+    return (
+        (
+            save_removal.slus_runtime_to_file_offset(BANK_B_CANARY_STUB_ADDRESS),
+            build_bank_b_canary_stub(),
+        ),
+        (
+            save_removal.slus_runtime_to_file_offset(BANK_B_CANARY_HOOK_ADDRESS),
+            struct.pack("<I", _j(0x02, BANK_B_CANARY_STUB_ADDRESS)),
+        ),
+    )
+
+# --- TESTING (2026-08-16): force every random floor to the single-room layout -
+#
+# Crash-repro knob for the v1.0.1 field report (FelixFire, Discord 2026-08-16):
+# floor 3 came up as "one large room", and once 7-8 monsters and the floor's
+# items were on screen together the game fell over. Nobody has a savestate;
+# the layout is a 1-in-256 roll, so this makes the roll certain to reproduce
+# it on demand. Delete this section AND the matching `if FORCE_SINGLE_ROOM_TEST:`
+# block in build_player_ppf once the crash is understood; nothing else refers
+# to either. Setting the flag False has the same effect for one generation.
+#
+# The mechanism (docs/game/floor-generation.md section 5):
+# `generate_procedural_floor_layout` (FloorGen 0x80019AF8) rolls
+# `random_range_inclusive(0, 0x200)` and takes the single-room fallback at
+# 0x8001A120 when the (sign-extended) result is below 2 - `slti v0,v0,2` at
+# 0x80019BE0, `beqz` past the jump at 0x80019BE4. Raising the immediate to
+# 0x7FFF makes every roll qualify: one 60x60 room at (2,2), no bigger map,
+# every random floor (3+; 1 and 2 are predefined layouts, 31 and 40 are
+# special cases). This is exactly the community force-single-room patch. The
+# floor-generation package ships in two disc copies, verified identical over
+# this range; both are written, as the spawn-weight edits are.
+FORCE_SINGLE_ROOM_TEST = False  # ridden 2026-08-16: no crash reproduced; left off, not deleted
+FORCE_SINGLE_ROOM_COMPARE_ADDRESS = 0x8001_9BE0
+FORCE_SINGLE_ROOM_ORIGINAL_WORD = 0x2842_0002    # slti v0,v0,2
+FORCE_SINGLE_ROOM_REPLACEMENT_WORD = 0x2842_7FFF  # slti v0,v0,0x7FFF
+assert 0x8001_6000 <= FORCE_SINGLE_ROOM_COMPARE_ADDRESS < 0x8002_0000  # the verified-identical span
+assert FORCE_SINGLE_ROOM_COMPARE_ADDRESS % 4 == 0
+
+
+def iter_force_single_room_dungeon_file_patches() -> tuple[tuple[int, bytes], ...]:
+    """(DUNGEON.BIN file offset, instruction word) for BOTH package copies. Empty when off."""
+
+    if not FORCE_SINGLE_ROOM_TEST:
+        return ()
+    from . import floor_item_pool
+
+    return tuple(
+        (
+            copy_offset + FORCE_SINGLE_ROOM_COMPARE_ADDRESS - 0x8000_0000,
+            struct.pack("<I", FORCE_SINGLE_ROOM_REPLACEMENT_WORD),
+        )
+        for copy_offset in floor_item_pool.FLOOR_GENERATION_FILE_OFFSETS
+    )
+
 # Carrier between the two. Inside the save-backed block, past ADSV's defined
 # bytes, inside the span the bucket map confirmed unwritten. It is not
 # zero-initialised, so the consumer accepts only the three valid levels and
@@ -1178,22 +1579,237 @@ SEND_TOKEN_BLOCK_OFFSET = FORCED_TRAP_STUB_OFFSET + FORCED_TRAP_STUB_CAPACITY
 NO_SEND_TOKENS_TEXT = "You have no send tokens."
 SEND_COMPLETE_TEXT = "Sent!"
 NO_SEND_TOKENS_MESSAGE_OFFSET = SEND_TOKEN_BLOCK_OFFSET
-SEND_COMPLETE_MESSAGE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x40
-SEND_TOKEN_GATE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x60
-SEND_TOKEN_CHECK_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x160
+SEND_COMPLETE_MESSAGE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x38
+SEND_TOKEN_GATE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x48
+SEND_TOKEN_CHECK_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x130
 # The spend-and-confirm routine lives here rather than inline in the commit
 # for a hard reason: the commit's slot is 416 bytes and it was already using
 # 380, so the twelve words this needs overran it. The commit calls in - `ra`
 # is expendable at that point by its own contract (both its exits restore
 # `ra` from the frame).
-SEND_TOKEN_SPEND_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x1C0
+SEND_TOKEN_SPEND_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x168
 # Spend-and-say-so, the commit's success tail. Out of line for the same
 # reason the spend is: the commit's slot has twelve bytes left. Calling it
 # instead of the bare spend costs the commit nothing - it is the same one
 # word, retargeted - which is also what makes the confirmation revertible
 # by pointing that word back at SEND_TOKEN_SPEND_ADDRESS.
-SEND_COMPLETE_ROUTINE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x200
-SEND_TOKEN_BLOCK_CAPACITY = 0x240
+SEND_COMPLETE_ROUTINE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + 0x190
+# Repacked 0x240 -> 0x1A0 on 2026-08-14, returning 160 bytes to the floor-page
+# window. The six sub-blocks were laid out on round numbers during development,
+# which is the right way to build - it leaves room for the second iteration -
+# but nothing did the end pass. Measured sizes: messages 48 and 6, gate 228,
+# check 52, spend 36, complete 44 - plus a few bytes of headroom each, because
+# the round numbers existed for a reason: a first iteration is rarely the last.
+# The build raises on overflow (it caught a message terminator this pack missed),
+# so growing any of them is loud rather than silent.
+SEND_TOKEN_BLOCK_CAPACITY = 0x1C0
+
+# --- EXPERIMENT (2026-08-14): the location-check carrier, first ride ----------
+#
+# One monster per floor holds an item and runs Picket's AI. Scoped down from the
+# design in `docs/game/monster-ai.md` §5 so that a single build proves the parts
+# that cannot be proven statically; the forced off-band spawn is deliberately
+# NOT here.
+#
+# **Which monster.** The first one the floor spawns. No new spawn code: the
+# carried-item roll already runs once per monster at floor build, and its caller
+# only calls it when the slot is empty, so claiming the first caller wins the
+# race for free. Cost: the carrier is an ordinary band species at its ordinary
+# level, which is exactly what a first ride wants.
+#
+# **The item** is a Wind Crystal (`0x0603`) - the same literal the vanilla
+# generator writes at `0x8001E3A4`, so the descriptor shape is already proven,
+# and unmistakable on the floor when it drops.
+#
+# **Where the code lives.** The window's free static space, which is 96 B, not
+# the 672 B `docs/systems/floor-text-paging.md` claims - the send-token block
+# took 0x240 from 0xAA0. The two stubs are 88 B. Window space is code-only (the
+# per-floor read rewrites it with identical bytes), so the mutable pair lives in
+# the 120-byte unrestricted run after the loader.
+#
+# **The ordering guess this build encodes.** Window code is live from boot
+# (floor 1's page is baked into the seed block) and every later rewrite restores
+# identical bytes, so it cannot be absent when a hook fires - the loader's
+# position relative to monster spawning should not matter. The forced-trap stub
+# is the standing precedent, in the same window and ridden since 0.9.89. If that
+# reasoning is wrong the failure is diagnostic rather than silent: a hook
+# jumping into not-yet-written window bytes lands in zeros and crashes on the
+# first floor build, which points straight at ordering. A carrier that simply
+# never appears would instead mean the claim never ran, and a carrier that
+# appears but behaves normally would mean the AI hook missed - three failures,
+# three different meanings.
+#
+# **No per-floor clear.** The pair holds (floor, unit*), and the claim fires
+# whenever the stored floor differs from `g_current_floor_number`. That needs no
+# floor-build hook. Known gap: leaving the tower from floor N and re-entering to
+# reach N again as the first floor would skip one carrier. Benign, and visible.
+CARRIER_PROBE = True
+CARRIER_CODE_OFFSET = SEND_TOKEN_BLOCK_OFFSET + SEND_TOKEN_BLOCK_CAPACITY
+CARRIER_CODE_CAPACITY = FLOOR_PAGE_WINDOW_END - CARRIER_CODE_OFFSET
+CARRIER_ROLL_STUB_ADDRESS = SEED_BLOCK_ADDRESS + CARRIER_CODE_OFFSET
+# The claim grew from 9 words to 20 on 2026-08-15: it hands out the real
+# marker (slot MARKER_CARRIER_SLOT) and reads the journal first, so a floor
+# whose third check is already banked spawns its carrier empty-handed - the
+# "suppress the item, not the spawn" gate from docs/game/monster-ai.md.
+CARRIER_CLAIM_STUB_SIZE = 0x84
+# 0x20 (2026-08-15, was 0x28): the per-turn palette re-stamp is gone - the
+# carrier is already the one monster that does not belong on the floor, the
+# colour is a bonus, and a wind seed reverting it costs the player nothing
+# but a fireball. The claim stamps once at spawn instead.
+CARRIER_AI_STUB_SIZE = 0x20
+CARRIER_DRAW_STUB_SIZE = 0x24
+CARRIER_AI_STUB_ADDRESS = CARRIER_ROLL_STUB_ADDRESS + CARRIER_CLAIM_STUB_SIZE
+CARRIER_DRAW_STUB_ADDRESS = CARRIER_AI_STUB_ADDRESS + CARRIER_AI_STUB_SIZE
+# Mutable pair, outside the window: +0x00 halfword last-claimed floor,
+# +0x04 word carrier unit pointer.
+CARRIER_STATE_OFFSET = FLOOR_PAGE_LOADER_OFFSET + FLOOR_PAGE_LOADER_CAPACITY
+CARRIER_STATE_ADDRESS = SEED_BLOCK_ADDRESS + CARRIER_STATE_OFFSET
+# The carried item: the AP marker for the floor's third slot. It was 0x0603
+# (a Wind Crystal) for the two probe rides; the caller stores the whole word
+# into unit+0x48 (`sw v0,0x48(s0)` at 0x800A0B48), and the death drop puts
+# all four bytes on the ground, so the collect hook sees an ordinary marker.
+CARRIER_ITEM_DESCRIPTOR = marker_descriptor_word(MARKER_CARRIER_SLOT)
+# On a floor whose third check is already banked the carrier spawns holding
+# NOTHING (the claim returns 0): a plain level-1 monster of an out-of-place
+# species, running its own species AI - it may fight, it drops nothing, and
+# there is no item on the floor for a player to confuse with a check.
+#
+# History, because both alternatives were tried and both failed on a ride:
+#
+# * Empty-handed was the ORIGINAL behaviour, and it looked broken while the AI
+#   dispatch keyed on the unit POINTER: the empty carrier still got Picket's
+#   handler, took the THIEF branch, lost its once-ever 50/50 and fell through
+#   to the default aggressive AI (docs/game/monster-ai.md §2b, the "Nyuel"
+#   reports). The dispatch keys on the HELD MARKER now (2026-08-17), so an
+#   empty-handed unit simply is not a carrier any more and that failure
+#   cannot recur.
+# * From 2026-08-15 to 2026-08-17 it held the marker WITH the equipped bit
+#   (0xAD020B01, `+0x4B & 0x20`): holding branch, so it fled, and the
+#   overlay's death drop (`0x800AD24C`) skips an equipped carried item. But
+#   the drop is PER SPECIES PACKAGE, and two pool species return whatever
+#   they hold from their own death routine with no equipped-bit test - Picket
+#   (`0x80162D48`, the "give the stolen item back" fly-out; a stolen equipped
+#   item has to come back) and Viper (the same code inline). A floor-22 Picket
+#   carrier on a banked floor dropped the phantom (`Creamcrash.sav`); the
+#   collect hook rejected 0xAD, so it entered the inventory as an
+#   unidentified, EQUIPPED-flagged Cream, "have" opened the equip dialogue,
+#   and throwing it crashed the game. An item no player can be handed is the
+#   only safe phantom, and that is no item at all.
+DESCRIPTOR_EQUIPPED_BIT = 0x2000_0000
+assert CARRIER_ITEM_DESCRIPTOR & DESCRIPTOR_EQUIPPED_BIT == 0, (
+    "The carried marker must not carry the equipped bit: the death drop would "
+    "skip it (the first ride's whole bug)."
+)
+# What the AI dispatch keys on (2026-08-17): the [id, category] halfword of
+# the unit's carried item at unit+0x48. Both the real marker and the banked
+# phantom read [MARKER_ID, MARKER_CATEGORY] there; a monster spawned into a
+# dead carrier's actor slot reads zero (the pool zeroes a slot on
+# allocation), which is what retired the pointer test - see the dispatch
+# docstring in _build_carrier_stubs and docs/game/monster-ai.md §2d.
+#
+# **Standing conflict, recorded so it is not re-discovered the hard way:**
+# category 0x0B is the GIFT category, and this test makes ANY monster
+# holding a category-0x0B item run Picket's flee AI. Today only two things
+# put one there: this claim, and Koh throwing a gift at a monster
+# (monster_receives_thrown_item - it then flees; harmless). But the Viper's
+# handler hunts a ground-item CATEGORY (`0x800A6E8C(actor, 0x12, ...)`, eggs)
+# and picks it up into +0x48 - if that 0x12 is ever retargeted at 0x0B to
+# make Vipers chase AP markers, a Viper that picked one up would pass this
+# test and switch to Picket's flee AI (on top of whatever the Viper does with
+# what it holds - eating it would lose the check outright). Any such feature
+# must widen this test (e.g. the quality byte +0x4A == MARKER_CARRIER_SLOT,
+# or the status byte) first.
+UNIT_CARRIED_ITEM_OFFSET = 0x48
+CARRIER_HELD_MARKER_HALFWORD = MARKER_ID | (MARKER_CATEGORY << 8)
+assert CARRIER_HELD_MARKER_HALFWORD == CARRIER_ITEM_DESCRIPTOR & 0xFFFF
+assert 0 < CARRIER_HELD_MARKER_HALFWORD < 0x8000, "must fit an addiu immediate unsigned"
+assert UNIT_CARRIED_ITEM_OFFSET % 2 == 0, "lhu needs a halfword-aligned offset"
+# The actor's palette word (+0x12) is a SIGNED CLUT DELTA in units of one
+# 16-colour palette, added by the sprite renderer (SLUS 0x8004595C) to the
+# current animation cell's own CLUT id. Each of the six graphics slots owns
+# three CLUT rows in VRAM (y = 466 + 3*slot is the base row; y-2 holds the
+# translucent twins the game reaches with -128; y-1 a third set).
+#
+# A species' base row is FOUR GROUPS OF FOUR palettes (x = 0..15): one group
+# per form (wild + the three familiar elements - the medal Picket's 0x0C is
+# group 3, sub-slot 0), and within a group sub-slots 0 and 1 are populated
+# on every species while sub-slots 2 and 3 are all-zero - i.e. TRANSPARENT -
+# on about half of them (Troll, Nyuel, Barong, Glacier, Unicorn, ...;
+# surveyed over 16 species in the tower save states, 2026-08-15). A cell's
+# own CLUT can already sit on sub-slot 1 (a Unicorn's normal frame does; a
+# Troll's hit-flash frame does), so a delta that is not a multiple of four
+# can land a frame on an empty sub-slot and draw NOTHING but the shadow. That
+# was the floor-3 invisible Unicorn (delta +2, `invisible_carrier.sav`);
+# the floor-2 Golem with the same delta was visible only because Golem fills
+# all sixteen. So the choices are the three other form groups and nothing
+# else - which is also the strongest tell, a monster wearing another
+# element's colours. The world draws one per seed.
+CARRIER_PALETTE = 0x000C                # the medal Picket's white (group 3); the default
+CARRIER_PALETTE_CHOICES = (4, 8, 12)
+assert all(choice % 4 == 0 for choice in CARRIER_PALETTE_CHOICES), (
+    "A carrier palette delta that is not a multiple of four can land on an "
+    "empty (transparent) CLUT sub-slot on some species."
+)
+# The unit's talent bitfield (unit+0x54) and the sleep-proof talent bit, read
+# by the thrown-sleep path's `has_talent` helper at 0x800C8408 (tower
+# overlay). It does NOT gate the spawn-time sleep - every species constructor
+# rolls that itself (50%, effect 1, 32..95 turns, e.g. 0x80170CB0 in Pulunpa's
+# package) straight into apply_status - so the claim also clears the effect.
+UNIT_TALENTS_OFFSET = 0x54
+TALENT_SLEEP_PROOF = 0x0200_0000
+# Resident SLUS: `clear_timed_effect(unit, effect_id)` - walks the four timed
+# status slots at unit+0x2C.. and runs the effect's expiry handler if it is
+# present. Effect 1 is sleep (bit 0x200 of unit+0x1C; its expiry handler at
+# 0x80042C2C clears the bit exactly the way a natural wake-up does).
+CLEAR_TIMED_EFFECT_ADDRESS = 0x8004_2B68
+SLEEP_EFFECT_ID = 1
+# Hook sites, DUNGEON.BIN offsets (= runtime - 0x80000000 + 0x1A8A0).
+CARRIER_ROLL_HOOK_DUNGEON_OFFSET = 0xBB3DC   # jal roll_carried_item @0x800A0B3C
+CARRIER_SPAWN_HOOK_DUNGEON_OFFSET = 0xC129C  # jal random_range     @0x800A69FC
+CARRIER_DRAW_HOOK_DUNGEON_OFFSET = 0xBB234   # jal rand            @0x800A0994
+CARRIER_AI_HOOK_DUNGEON_OFFSET = 0xC916C     # lbu species        @0x800AE8CC
+ROLL_CARRIED_ITEM_ADDRESS = 0x800A_9230
+AI_DISPATCH_RESUME_ADDRESS = 0x800A_E8D4     # the addiu that turns v0 into an index
+SPAWN_MONSTER_ADDRESS = 0x800A_08A0
+RANDOM_RANGE_ADDRESS = 0x800A_6DA4
+MONSTER_TABLE_POINTER_ADDRESS = 0x8008_3478
+# The carrier is forced through the sixteenth band slot, which is borrowed for
+# the duration of one spawn and put back before the vanilla loops ever read it -
+# so no disc table is edited, no slot range is narrowed, and the respawn draw is
+# untouched. See docs/game/monster-ai.md.
+CARRIER_SLOT_INDEX = 15
+CARRIER_SLOT_BYTE_OFFSET = CARRIER_SLOT_INDEX * 2
+# **Not** `CARRIER_SLOT_INDEX + 2`. A live breakpoint (2026-08-14) showed that
+# `0x800A08A0` gives the levelling loop and the carried-item roll only to
+# `a0 < 2` spawns; the sixteen slot-driven ones skip both. So the forced spawn
+# goes in as `a0 = 1` - which picks its band slot from `rand & 0xF` instead of
+# from `a0`, and is why the draw stub exists.
+CARRIER_SPAWN_ARG = 1
+LCG_ADDRESS = 0x800A_6D30
+CARRIER_LEVEL = 1
+# One byte per floor, 1..39: the species that floor's carrier spawns as,
+# chosen per seed by `monster_spawns.plan_floor_spawns` from outside that
+# floor's own roster. The level is always CARRIER_LEVEL, so the table needs
+# no second byte. Biased by -1 in the stub so `floor` indexes it directly.
+CARRIER_SPECIES_TABLE_OFFSET = (
+    CARRIER_CODE_OFFSET
+    + CARRIER_CLAIM_STUB_SIZE
+    + CARRIER_AI_STUB_SIZE
+    + CARRIER_DRAW_STUB_SIZE
+)
+CARRIER_SPECIES_TABLE_ADDRESS = SEED_BLOCK_ADDRESS + CARRIER_SPECIES_TABLE_OFFSET
+CARRIER_SPECIES_TABLE_FLOORS = 39
+assert (
+    CARRIER_SPECIES_TABLE_OFFSET + CARRIER_SPECIES_TABLE_FLOORS
+    <= FLOOR_PAGE_WINDOW_END
+), "The carrier species table overruns the floor-page window."
+# The forced-spawn stub is the one piece that cannot live in the floor-page
+# window: it needs no per-floor restore, and the window is down to 4 spare bytes.
+# State: +0x00 carrier unit pointer, +0x04 "claiming now" flag.
+CARRIER_CLAIMING_STATE_OFFSET = 4
+CARRIER_FORCED_STUB_OFFSET = CARRIER_STATE_OFFSET + 8
+CARRIER_FORCED_STUB_ADDRESS = SEED_BLOCK_ADDRESS + CARRIER_FORCED_STUB_OFFSET
+CARRIER_UNRESTRICTED_END = 0xE48
 NO_SEND_TOKENS_MESSAGE_ADDRESS = SEED_BLOCK_ADDRESS + NO_SEND_TOKENS_MESSAGE_OFFSET
 SEND_COMPLETE_MESSAGE_ADDRESS = SEED_BLOCK_ADDRESS + SEND_COMPLETE_MESSAGE_OFFSET
 SEND_TOKEN_GATE_ADDRESS = SEED_BLOCK_ADDRESS + SEND_TOKEN_GATE_OFFSET
@@ -1697,10 +2313,37 @@ def _build_inventory_hud_refresh() -> bytes:
     return b.build()
 
 
+def _emit_persistent_state_zero_loop(
+    b: "_MipsBuilder", *, base: int, cursor: int, end: int, label: str
+) -> None:
+    """Zero ADSV from the location mask to the end of the record.
+
+    `base` holds PERSISTENT_STATE_ADDRESS; `cursor` and `end` are scratch.
+    Both initializers (this page's and the town core's) call this, so the two
+    can never disagree about which fields a fresh save starts with. Five words
+    instead of one store per word - the town core's slot is 176 bytes and the
+    v4 record has eighteen words to clear. The 0.9.84 burn was a field nobody
+    zeroed landing on a neighbour; enumerating the span from the layout is
+    what stops that recurring.
+    """
+    first = PERSISTENT_ZEROED_WORD_OFFSETS[0]
+    b.emit(
+        _i(0x09, base, cursor, first),                  # addiu cursor,base,first
+        _i(0x09, base, end, PERSISTENT_STATE_SIZE),     # addiu end,base,size
+        # The ball charger's level word sits just below the record and starts
+        # at zero with it (BALL_CHARGE_LEVEL_ADDRESS).
+        _i(0x2B, base, 0, BALL_CHARGE_LEVEL_ADDRESS - PERSISTENT_STATE_ADDRESS),
+    )
+    b.label(label)
+    b.emit(_i(0x09, cursor, cursor, 4))                 # addiu cursor,cursor,4
+    b.branch(0x05, cursor, end, label)                  # bne cursor,end,label
+    b.emit(_i(0x2B, cursor, 0, -4))                     # (delay) sw zero,-4(cursor)
+
+
 def _build_seed_state_initializer() -> bytes:
     # Registers: t0 seed/mailbox, t1/t2 scratch, t3 save extension,
-    # t4/t5/t6 values. The save extension occupies the unused final 0x40
-    # bytes of the 0x6000-byte save buffer, beginning at offset 0x5FC0.
+    # t4/t5/t6 values. The save extension is the tail of the 0x6000-byte save
+    # buffer, beginning at PERSISTENT_STATE_ADDRESS.
     b = _MipsBuilder()
     _load_address(b, 8, SEED_BLOCK_ADDRESS)
     b.emit(
@@ -1756,13 +2399,13 @@ def _build_seed_state_initializer() -> bytes:
         _i(0x23, 8, 12, 12),
         0,
         _i(0x2B, 11, 12, 12),
-        _i(0x2B, 11, 0, 0x10),
-        _i(0x2B, 11, 0, 0x14),
-        _i(0x2B, 11, 0, 0x18),
-        _i(0x2B, 11, 0, PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET),
-        _i(0x2B, 11, 0, PERSISTENT_SHOP_MASK_OFFSET),
-        _i(0x2B, 11, 0, PERSISTENT_GOLD_GRANTED_OFFSET),
-        # The send-token count. Outside ADSV's own 0x2C, so it needs no
+    )
+    # Every field after the signature starts at zero: both journals, the
+    # received count, the keycard level (overridden below on test builds), the
+    # gold counter and the intro flags.
+    _emit_persistent_state_zero_loop(b, base=11, cursor=12, end=13, label="zero")
+    b.emit(
+        # The send-token count. Outside ADSV, so it needs no
         # version bump (and cannot repeat the 0.9.84 burn, where growing the
         # record landed a field on the shortcut carrier); it is initialized
         # here because this is the routine that runs exactly once per fresh
@@ -1786,11 +2429,18 @@ def _build_seed_state_initializer() -> bytes:
         b.emit(_i(0x2B, 11, 0, PERSISTENT_KEYCARD_LEVEL_OFFSET))
 
     b.label("sync_mailbox")
-    # The mailbox mirror. Its upper and the four store offsets used to be
-    # hard-coded around `lui t0,0x8020`, which is why the 2026-08-01 carve
-    # retraction's constant sweep missed it entirely and the whole-disc
-    # rescan had to find it: an encoded immediate matches no address grep.
-    # Derived from HIGH_MAILBOX_ADDRESS now, so it moves with the mailbox.
+    # The mailbox mirror. Its upper and the store offset used to be hard-coded
+    # around `lui t0,0x8020`, which is why the 2026-08-01 carve retraction's
+    # constant sweep missed it entirely and the whole-disc rescan had to find
+    # it: an encoded immediate matches no address grep. Derived from
+    # HIGH_MAILBOX_ADDRESS now, so it moves with the mailbox.
+    #
+    # Only the keycard level (+0x18) is mirrored. The three words this also
+    # copied into the mailbox's "collected floor-location request mirror"
+    # (+0x90..+0x9B) went with ADSV v4: no game code ever read that mirror -
+    # the spawner and the collect hook read the journal itself - and the
+    # 40-byte journal would not fit in a 16-byte field that ends at the request
+    # sequence word.
     _mailbox_upper = _upper(HIGH_MAILBOX_ADDRESS)
 
     def _mailbox_store(register: int, field: int) -> int:
@@ -1803,14 +2453,8 @@ def _build_seed_state_initializer() -> bytes:
 
     b.emit(
         _i(0x0F, 0, 8, _mailbox_upper),
-        _i(0x23, 11, 12, 0x10),
-        _i(0x23, 11, 13, 0x14),
-        _i(0x23, 11, 14, 0x18),
         _i(0x23, 11, 9, PERSISTENT_KEYCARD_LEVEL_OFFSET),
         0,
-        _mailbox_store(12, 0x90),
-        _mailbox_store(13, 0x94),
-        _mailbox_store(14, 0x98),
         _mailbox_store(9, 0x18),
     )
 
@@ -2085,6 +2729,247 @@ def _build_floor_page_loader() -> bytes:
         _i(0x09, 29, 29, 0x28),                 # addiu sp,sp,0x28
         _j(0x02, FLOOR_PAGE_ANIMATOR_CALLBACK_ADDRESS),  # the real animator
         0,
+    )
+    return b.build()
+
+
+def _build_carrier_stubs(palette: int = CARRIER_PALETTE) -> bytes:
+    """Claim, AI-dispatch and RNG-draw stubs, packed back to back.
+
+    All three key off the same pair of words at `CARRIER_STATE_ADDRESS`:
+    `+0x00` the carrier unit pointer, `+0x04` a "claiming now" flag the
+    forced-spawn stub raises around its single call.
+
+    **Claim** (retargets the `jal` at `0x800A0B3C`; `a0` = unit; returns the
+    descriptor the caller stores into `unit+0x48`):
+
+        if (!claiming) tail-jump to the real roll
+        carrier = unit
+        unit->talents |= SLEEP_PROOF          ; thrown sleep cannot stall it
+        clear_timed_effect(unit, SLEEP)       ; the constructor's 50% spawn-sleep
+        actor->palette = CARRIER_PALETTE      ; one-shot; a re-skin may undo it
+        banked = journal[floor-1] & (1 << CARRIER_SLOT)
+        return banked ? 0 : CARRIER_ITEM_DESCRIPTOR
+             ; = the slot-2 marker, or nothing at all when the floor's third
+             ;   check is already banked
+
+    The sleep is cleared here and not prevented, because every species
+    constructor rolls it itself (50%, effect 1, straight into apply_status -
+    the sleep-proof talent is only consulted by the thrown-sleep path), and the
+    roll caller is the first hook that runs after the constructor with the
+    unit in hand.
+
+    Keying on the flag rather than on the species lets the carrier share a
+    species with the floor's own monsters without being confused for one, and it
+    retires both the floor-number latch of the first ride and the species compare
+    of the second. The journal read is the "suppress the item, not the spawn"
+    gate: a collected floor still gets its carrier, so a player never sees a
+    floor where the carrier is simply absent - but it spawns EMPTY-HANDED
+    there, a plain level-1 monster on its own species AI (the dispatch below
+    keys on the held marker, so with nothing in hand it is not a carrier).
+    Between 2026-08-15 and 2026-08-17 it held an *equipped* copy of the marker
+    instead, so that it would flee and the overlay death drop would skip it;
+    Picket's and Viper's own death routines drop what they hold regardless,
+    and a player was handed the phantom (see the note above
+    DESCRIPTOR_EQUIPPED_BIT). The floor is bounded by the forced-spawn stub
+    before claiming is ever raised, so the journal index here cannot leave the
+    record.
+
+    **AI dispatch** (replaces `lbu v0, 0x13(s5)` at `0x800AE8CC`; must leave the
+    species in `v0` and resume at `0x800AE8D4`):
+
+        v0 = unit->species
+        if (unit->carried[id, category] == [MARKER_ID, MARKER_CATEGORY])
+            v0 = 0x20 (Picket)
+
+    It runs on every think (`ai_decide` is what the species packages call
+    each turn), so it answers "is this unit a carrier *right now*" - and the
+    answer is "it holds the floor's marker". Until 2026-08-17 it compared the
+    unit pointer against the one the claim recorded, and that pointer was
+    never cleared at death: units are LIFO actor-pool slots (`allocate_actor`
+    0x8003FC64 pops the head, `sweep_deleted_actors` 0x800401FC pushes dead
+    ones back), so the next monster spawned after the carrier was killed
+    usually landed on the same address and inherited Picket's handler -
+    empty-handed, so the thief branch: 50/50, then its own species ability
+    aimed at Koh whenever it faced him (a floor-4 Baloon casting Fly at Koh;
+    docs/game/monster-ai.md §2d). Keying on the held item has no such
+    lifetime: a reused slot holds nothing, a banked floor's carrier is spawned
+    holding nothing (and so runs its own AI), a carrier that lost its marker
+    (a Troll thrown a weapon) reverts to its own AI, and a Manoeva copy of the
+    carrier is a fresh unit that never copies +0x48. The pointer is still
+    written by the claim (debug state); nothing reads it.
+
+    Only two things can put a category-0x0B (gift) item into a monster's
+    +0x48 besides us: Koh throwing a gift at it (it then flees - fine), and a
+    Viper if its egg-hunt category (`0x800A6E8C(actor, 0x12, ...)`) were ever
+    retargeted at 0x0B, the AP marker category - **that idea would collide
+    with this test**, see the note at CARRIER_HELD_MARKER_HALFWORD.
+
+    The palette used to be re-stamped here every turn so it survived a re-skin;
+    it is stamped once at claim now (2026-08-15). The carrier is already the
+    one monster that does not belong on its floor - the colour is a bonus - and
+    a wind seed reverting it costs the player nothing but a fireball. And a
+    sleeping unit never reaches this dispatch, which is why the stamp had to
+    move to the claim in the first place.
+
+    **RNG draw** (retargets the `jal` to the LCG at `0x800A0994`, the band-slot
+    draw on the `a0 < 2` path; the caller masks the result with `0xF`):
+
+        if (claiming) return CARRIER_SLOT_INDEX
+        else tail-jump to the real LCG
+
+    This is what makes an `a0 = 1` spawn - the only kind that gets levelled and
+    rolled - land on a slot we control instead of a random one. While claiming it
+    consumes no RNG state, so vanilla draws are not shifted.
+    """
+    state_lo = _lower(CARRIER_STATE_ADDRESS)
+    claiming_lo = state_lo + CARRIER_CLAIMING_STATE_OFFSET
+    journal = PERSISTENT_STATE_ADDRESS + PERSISTENT_LOCATION_MASK_OFFSET
+    cb = _MipsBuilder()
+    cb.emit(
+        _i(0x0F, 0, 8, _upper(CARRIER_STATE_ADDRESS)),   # lui   t0, hi(state)
+        _i(0x23, 8, 9, claiming_lo),                     # lw    t1, claiming
+        _i(0x09, 0, 5, SLEEP_EFFECT_ID),                 # addiu a1, zero, 1  (harmless on the real path)
+    )
+    cb.branch(0x04, 9, 0, "real")                        # beq   t1, zero, real
+    cb.emit(
+        _i(0x0F, 0, 12, TALENT_SLEEP_PROOF >> 16),       # (delay) lui t4, hi(sleep-proof)
+        # Claiming. A frame for ra and the unit: the effect clear is a real
+        # call and clobbers a0 and every t-register.
+        _i(0x09, 29, 29, -0x10),                         # addiu sp, sp, -0x10
+        _i(0x2B, 29, 31, 0x0C),                          # sw    ra, 0xC(sp)
+        _i(0x2B, 8, 4, state_lo),                        # sw    a0, carrier
+        _i(0x23, 4, 11, UNIT_TALENTS_OFFSET),            # lw    t3, unit->talents
+        _i(0x2B, 29, 4, 0x08),                           # sw    a0, 8(sp)
+        _r(11, 12, 11, 0, 0x25),                         # or    t3, t3, t4   sleep-proof
+        _j(0x03, CLEAR_TIMED_EFFECT_ADDRESS),            # jal   clear_timed_effect(unit, 1)
+        _i(0x2B, 4, 11, UNIT_TALENTS_OFFSET),            # (delay) sw t3, unit->talents
+        # Awake. One-shot palette stamp on the actor, then the journal gate.
+        _i(0x23, 29, 4, 0x08),                           # lw    a0, 8(sp)   unit
+        _i(0x0F, 0, 9, 0x8008),                          # lui   t1, 0x8008
+        _i(0x23, 4, 11, 0xFFEC),                         # lw    t3, unit[-0x14]  actor
+        _i(0x25, 9, 9, 0x146C),                          # lhu   t1, floor
+        _i(0x09, 0, 12, palette & 0xFFFF),               # addiu t4, zero, palette
+        _i(0x0F, 0, 10, _upper(journal - 1)),            # lui   t2, hi(journal-1)
+        _i(0x29, 11, 12, 0x0012),                        # sh    t4, actor->palette
+        _r(10, 9, 10, 0, 0x21),                          # addu  t2, t2, t1
+        _i(0x0F, 0, 2, CARRIER_ITEM_DESCRIPTOR >> 16),   # lui   v0, hi(item)
+        _i(0x24, 10, 10, _lower(journal - 1)),           # lbu   t2, journal[floor-1]
+        _i(0x0D, 2, 2, CARRIER_ITEM_DESCRIPTOR & 0xFFFF),  # ori v0, v0, lo(item)
+        _i(0x0C, 10, 10, 1 << MARKER_CARRIER_SLOT),      # andi  t2, t2, slot bit (banked?)
+        _i(0x0B, 10, 10, 1),                             # sltiu t2, t2, 1    -> 1 if not banked, else 0
+        _r(0, 10, 10, 0, 0x23),                          # subu  t2, zero, t2 -> all ones, or 0
+        _i(0x23, 29, 31, 0x0C),                          # lw    ra, 0xC(sp)
+        _r(2, 10, 2, 0, 0x24),                           # and   v0, v0, t2   marker, or nothing
+        _r(31, 0, 0, 0, 0x08),                           # jr    ra
+        _i(0x09, 29, 29, 0x10),                          # (delay) addiu sp, sp, 0x10
+    )
+    cb.label("real")
+    cb.emit(
+        _j(0x02, ROLL_CARRIED_ITEM_ADDRESS),             # j     real roll
+        0,                                               # nop
+    )
+    claim = list(struct.unpack(f"<{len(cb.words)}I", cb.build()))
+    dispatch = [
+        _i(0x25, 21, 10, UNIT_CARRIED_ITEM_OFFSET),      # lhu   t2, s5->carried[id,category]
+        _i(0x24, 21, 2, 0x0013),                         # lbu   v0, s5->species
+        _i(0x09, 0, 11, CARRIER_HELD_MARKER_HALFWORD),   # addiu t3, zero, [MARKER_ID, MARKER_CATEGORY]
+        _i(0x05, 10, 11, 2),                             # bne   t2, t3, resume
+        0,                                               # nop
+        _i(0x09, 0, 2, 0x0020),                          # addiu v0, zero, Picket
+        _j(0x02, AI_DISPATCH_RESUME_ADDRESS),            # resume: j 0x800AE8D4
+        0,                                               # nop
+    ]
+    draw = [
+        _i(0x0F, 0, 8, _upper(CARRIER_STATE_ADDRESS)),   # lui   t0, hi(state)
+        _i(0x23, 8, 9, claiming_lo),                     # lw    t1, claiming
+        _i(0x09, 0, 2, CARRIER_SLOT_INDEX),              # addiu v0, zero, 15
+        _i(0x05, 9, 0, 3),                               # bne   t1, zero, forced
+        0,                                               # nop
+        _j(0x02, LCG_ADDRESS),                           # j     real LCG
+        0,                                               # nop
+        _r(31, 0, 0, 0, 0x08),                           # forced: jr ra
+        0,                                               # nop
+    ]
+    for body, size, name in (
+        (claim, CARRIER_CLAIM_STUB_SIZE, "claim"),
+        (dispatch, CARRIER_AI_STUB_SIZE, "AI dispatch"),
+        (draw, CARRIER_DRAW_STUB_SIZE, "RNG draw"),
+    ):
+        if len(body) * 4 != size:
+            raise ValueError(f"The carrier {name} stub is not its declared size.")
+    return struct.pack(
+        f"<{len(claim) + len(dispatch) + len(draw)}I", *claim, *dispatch, *draw
+    )
+
+
+def _build_carrier_forced_spawn() -> bytes:
+    """Force the carrier spawn before the floor ordinary population runs.
+
+    Retargets the `jal random_range` at `0x800A69FC`, the first thing the
+    population routine does - before both spawn loops, and before `s0`/`s1`/`s2`
+    are assigned, all three of which the routine has already saved. So the stub
+    owns those registers and needs a frame only for `ra`.
+
+        carrier  = 0
+        claiming = 1
+        base     = [0x80083478]              ; the floor live 16-slot band table
+        saved    = base[15]
+        base[15] = (CARRIER_SPECIES, level 1)
+        spawn(a0 = 1)                        ; the path that levels and rolls;
+                                             ; the draw stub pins its slot to 15
+        base[15] = saved
+        claiming = 0
+        tail-call random_range(4, 8)         ; what the hooked jal was for
+
+    Reliability, in layers: `0x800A08A0` retries coordinate selection sixteen
+    times internally (`0x800A0B4C` back to `0x800A0914`); running before the
+    sixteen ordinary spawns means the 32-unit cap cannot be reached; and `a0 = 1`
+    skips the minimum-distance-from-Koh rule, which only applies to `a0 = 0`.
+    """
+    state_lo = _lower(CARRIER_STATE_ADDRESS)
+    claiming_lo = state_lo + CARRIER_CLAIMING_STATE_OFFSET
+    slot = CARRIER_SLOT_BYTE_OFFSET
+    # Floors 1..CARRIER_SPECIES_TABLE_FLOORS only. Floor 40 has no check and no
+    # species-table entry (the byte after the table is whatever follows it in
+    # the window), so its population runs untouched: the carrier pointer is
+    # cleared and the tail-call happens with claiming still zero, which also
+    # bounds the claim stub's journal read.
+    b = _MipsBuilder()
+    b.emit(
+        _i(0x09, 29, 29, 0xFFF0),                        # addiu sp, sp, -0x10
+        _i(0x2B, 29, 31, 0x000C),                        # sw    ra, 0xC(sp)
+        _i(0x0F, 0, 8, 0x8008),                          # lui   t0, 0x8008
+        _i(0x21, 8, 8, 0x146C),                          # lh    t0, floor
+        _i(0x0F, 0, 16, _upper(CARRIER_STATE_ADDRESS)),  # lui   s0, hi(state)
+        _i(0x0B, 8, 9, CARRIER_SPECIES_TABLE_FLOORS + 1),  # sltiu t1, t0, 40
+    )
+    b.branch(0x04, 9, 0, "skip")                         # beq   t1, zero, skip
+    b.emit(
+        _i(0x2B, 16, 0, state_lo),                       # (delay) sw zero, carrier
+        _i(0x09, 0, 9, 1),                               # addiu t1, zero, 1
+        _i(0x2B, 16, 9, claiming_lo),                    # sw    t1, claiming
+        _i(0x0F, 0, 17, _upper(MONSTER_TABLE_POINTER_ADDRESS)),
+        _i(0x23, 17, 17, _lower(MONSTER_TABLE_POINTER_ADDRESS)),  # lw s1, table
+        _i(0x0F, 0, 11, _upper(CARRIER_SPECIES_TABLE_ADDRESS - 1)),      # lui   t3, hi(table-1)
+        _r(11, 8, 11, 0, 0x21),                          # addu  t3, t3, t0
+        _i(0x24, 11, 8, _lower(CARRIER_SPECIES_TABLE_ADDRESS - 1)),      # lbu   t0, table[floor-1]
+        0,                                               # nop (load delay)
+        _i(0x0D, 8, 8, CARRIER_LEVEL << 8),              # ori   t0, t0, level<<8
+        _i(0x25, 17, 18, slot),                          # lhu   s2, base[15]
+        _i(0x29, 17, 8, slot),                           # sh    t0, base[15]
+        _j(0x03, SPAWN_MONSTER_ADDRESS),                 # jal   spawn
+        _i(0x09, 0, 4, CARRIER_SPAWN_ARG),               # addiu a0, zero, 1
+        _i(0x29, 17, 18, slot),                          # sh    s2, base[15]
+        _i(0x2B, 16, 0, claiming_lo),                    # sw    zero, claiming
+    )
+    b.label("skip")
+    b.emit(
+        _i(0x23, 29, 31, 0x000C),                        # lw    ra, 0xC(sp)
+        _i(0x09, 0, 4, 4),                               # addiu a0, zero, 4
+        _i(0x09, 29, 29, 0x0010),                        # addiu sp, sp, 0x10
+        _j(0x02, RANDOM_RANGE_ADDRESS),                  # j     random_range
+        _i(0x09, 0, 5, 8),                               # addiu a1, zero, 8
     )
     return b.build()
 
@@ -2416,6 +3301,86 @@ def _build_forced_trap_stub() -> bytes:
         0,
     )
     return b.build()
+
+
+def build_carrying_trap_trampoline() -> bytes:
+    """Spring a pending forced trap from the CARRYING control handler.
+
+    See CARRYING_TRAP_TRAMPOLINE_ADDRESS for why this exists at all. Eleven
+    words, in 52 bytes of dead SDK string:
+
+        lui   t0, hi(request)
+        lbu   t1, lo(request)(t0)
+        nop                          ; load delay
+        beq   t1, zero, ret          ; nothing pending: just the displaced load
+        nop
+        jal   forced_trap_stub       ; gate, guards, plant, fire; returns jr ra
+        nop
+    ret:
+        lui   v0, 0x8008             ; the displaced `lhu v0,0x2(s0)`, absolute
+        lhu   v0, 0x3462(v0)
+        j     0x8008ECD4             ; past the hook's delay slot
+        nop
+
+    The request check is the trampoline's own and is NOT delegated to the
+    stub: the stub answers "no request" by tail-jumping to the receive
+    dispatcher, and delivering items into a held hand is exactly the
+    behaviour this must not change. `ra` is not preserved because nothing
+    needs it - the return is a `j` to a fixed address in the caller.
+    """
+
+    b = _MipsBuilder()
+    b.emit(
+        _i(0x0F, 0, 8, _upper(FORCED_TRAP_REQUEST_ADDRESS)),   # lui t0
+        _i(0x24, 8, 9, _lower(FORCED_TRAP_REQUEST_ADDRESS)),   # lbu t1,request
+        0,
+    )
+    b.branch(0x04, 9, 0, "ret")                 # beq t1,zero - nothing pending
+    b.emit(0)
+    b.emit(
+        _j(0x03, FORCED_TRAP_STUB_ADDRESS),     # jal the stub
+        0,
+    )
+    b.label("ret")
+    b.emit(
+        _i(0x0F, 0, 2, _upper(CARRYING_TRAP_DISPLACED_ADDRESS)),   # lui v0
+        _i(0x25, 2, 2, _lower(CARRYING_TRAP_DISPLACED_ADDRESS)),   # lhu v0
+        _j(0x02, CARRYING_TRAP_RETURN_ADDRESS),                    # j back
+        0,
+    )
+    trampoline = b.build()
+    if len(trampoline) > CARRYING_TRAP_TRAMPOLINE_CAPACITY:
+        raise ValueError(
+            f"The carrying-handler trap trampoline is {len(trampoline)} bytes; "
+            f"the donor string is {CARRYING_TRAP_TRAMPOLINE_CAPACITY}."
+        )
+    return trampoline
+
+
+def iter_carrying_trap_slus_file_patches() -> tuple[tuple[int, bytes], ...]:
+    """(SLUS file offset, bytes) for the trampoline over its donor string."""
+
+    from . import save_removal
+
+    return (
+        (
+            save_removal.slus_runtime_to_file_offset(CARRYING_TRAP_TRAMPOLINE_ADDRESS),
+            build_carrying_trap_trampoline(),
+        ),
+    )
+
+
+def iter_carrying_trap_dungeon_file_patches() -> tuple[tuple[int, bytes], ...]:
+    """(DUNGEON.BIN file offset, word) for the carrying handler's hook."""
+
+    from . import save_removal
+
+    return (
+        (
+            save_removal._dungeon_runtime_to_file_offset(CARRYING_TRAP_HOOK_ADDRESS),
+            struct.pack("<I", _j(0x03, CARRYING_TRAP_TRAMPOLINE_ADDRESS)),
+        ),
+    )
 
 
 def encode_menu_message(text: str) -> bytes:
@@ -2995,12 +3960,15 @@ def _build_render_resolver() -> bytes:
         _i(0x0B, 10, 11, 39),
     )
     b.branch(0x04, 11, 0, "local")
+    # The slot byte, bounded by the slot count. This used to fold floor and
+    # slot into a bit index (`(floor-1)*2 + slot < LOCATION_COUNT`) - the
+    # unrolled arithmetic that does not follow MARKER_SLOT_COUNT; the floor is
+    # already bounded above, so bounding the slot on its own is the same test
+    # without the multiply.
     b.emit(
         _i(0x24, 4, 11, 2),
-        _r(0, 10, 10, 1, 0x00),
         0,
-        _r(10, 11, 10, 0, 0x21),
-        _i(0x0B, 10, 11, LOCATION_COUNT),
+        _i(0x0B, 11, 11, MARKER_SLOT_COUNT),
     )
     b.branch(0x04, 11, 0, "local")
     b.emit(
@@ -3311,24 +4279,44 @@ def make_seed_signature(seed_name: str, player: int, player_name: str) -> bytes:
 
 
 def _build_tower_floor_bootstrap_helper() -> bytes:
-    """Consume a one-use Uncle floor marker without changing vanilla entries."""
+    """Consume a one-use Uncle floor marker without changing vanilla entries.
+
+    Also refills the ball charger's per-visit allowance - see
+    `BALL_CHARGE_USED_ADDRESS`.
+    """
 
     # The overlay hook at 0x80016448 executes its original LUI a0,0x8001 in the
     # jump delay slot.  A signed LH makes bit 15 directly testable by BLTZ.
     # Unmarked values return to the exact vanilla new-run continuation.  Marked
     # values are stripped, copied to current floor, and skip only the hardcoded
     # floor-1 store before rejoining the original counter/setup sequence.
+    # a0 is the save-data base (0x80010000) the whole way through - the hook's
+    # own delay slot loads it and the marked path stores the floor through it -
+    # so every save-block byte this helper writes addresses off a0 rather than
+    # rebuilding a base register. That is what pays for the allowance write
+    # below without the helper leaving its slot.
+    save_data_base = 0x8001_0000
+    used_offset = BALL_CHARGE_USED_ADDRESS - save_data_base
+    carrier_offset = SHORTCUT_PENDING_LEVEL_ADDRESS - save_data_base
+    assert 0 <= used_offset < 0x8000 and 0 <= carrier_offset < 0x8000, (
+        "The helper addresses both bytes off a0; they must be positive offsets."
+    )
+
     b = _MipsBuilder()
     b.emit(
         _i(0x21, 4, 8, 0x0234),  # lh t0,0x234(a0)
         _i(0x0F, 0, 5, 0x8008),  # load delay; lui a1,0x8008
+        # Refill the ball charger's per-town-visit allowance. This is the only
+        # seam that runs on BOTH ascents and only ever inside the tower, which
+        # is exactly the rule: the allowance is spent in town and one climb -
+        # any climb - hands it back.
+        _i(0x28, 4, 0, used_offset),  # sb zero,used(a0)
     )
     b.branch(0x01, 8, 0, "marked")  # bltz t0,marked
     b.emit(0)
     # Ordinary ascent: clear the carrier, then the exact vanilla continuation.
-    _load_address(b, 11, SHORTCUT_PENDING_LEVEL_ADDRESS)
     b.emit(
-        _i(0x28, 11, 0, 0),  # sb zero,0(t3)
+        _i(0x28, 4, 0, carrier_offset),  # sb zero,carrier(a0)
         _j(0x02, 0x8001_6450),
         0,
     )
@@ -3346,7 +4334,6 @@ def _build_tower_floor_bootstrap_helper() -> bytes:
     #
     # Zero is written on every ordinary ascent too, so a value left over from a
     # previous shortcut cannot fire on a normal run.
-    _load_address(b, 11, SHORTCUT_PENDING_LEVEL_ADDRESS)
     b.emit(_r(0, 0, 10, 0, 0x21))  # addu t2,zero,zero
     for floor, level in sorted(SHORTCUT_START_LEVELS.items()):
         b.emit(_i(0x09, 0, 9, floor))  # addiu t1,zero,floor
@@ -3356,7 +4343,7 @@ def _build_tower_floor_bootstrap_helper() -> bytes:
             _i(0x09, 0, 10, level),  # addiu t2,zero,level
         )
         b.label(f"not_{floor}")
-    b.emit(_i(0x28, 11, 10, 0))  # sb t2,0(t3)
+    b.emit(_i(0x28, 4, 10, carrier_offset))  # sb t2,carrier(a0)
 
     b.label("resume")
     # Rebuild what the vanilla continuation expects: a0 is the save-data base
@@ -3503,6 +4490,7 @@ def build_seed_block(
     signature: bytes,
     placements: Sequence[LocationPlacement],
     send_targets: Sequence[str] = (),
+    carrier_palette: int = CARRIER_PALETTE,
 ) -> bytes:
     if len(signature) != 8:
         raise ValueError("Azure Dreams seed signatures must be exactly eight bytes.")
@@ -3585,6 +4573,28 @@ def build_seed_block(
                 f"The {name} needs {len(payload)} bytes and has {limit - offset}."
             )
         block[offset : offset + len(payload)] = payload
+
+    # EXPERIMENT - see CARRIER_PROBE. Delete with it.
+    if CARRIER_PROBE:
+        carrier_stubs = _build_carrier_stubs(carrier_palette)
+        if len(carrier_stubs) > CARRIER_CODE_CAPACITY:
+            raise ValueError(
+                f"The carrier stubs need {len(carrier_stubs)} bytes and the "
+                f"window has {CARRIER_CODE_CAPACITY}."
+            )
+        block[CARRIER_CODE_OFFSET : CARRIER_CODE_OFFSET + len(carrier_stubs)] = (
+            carrier_stubs
+        )
+        forced = _build_carrier_forced_spawn()
+        if CARRIER_FORCED_STUB_OFFSET + len(forced) > CARRIER_UNRESTRICTED_END:
+            raise ValueError(
+                f"The carrier forced-spawn stub needs {len(forced)} bytes and the "
+                f"unrestricted run has "
+                f"{CARRIER_UNRESTRICTED_END - CARRIER_FORCED_STUB_OFFSET}."
+            )
+        block[CARRIER_FORCED_STUB_OFFSET : CARRIER_FORCED_STUB_OFFSET + len(forced)] = (
+            forced
+        )
 
     locked = encode_battle_message(ELEVATOR_LOCKED_MESSAGE_TEXT)
     if (
@@ -3734,7 +4744,10 @@ def build_seed_block(
         if placement.remote:
             block[REMOTE_LOCATION_MASK_OFFSET + index // 8] |= 1 << (index & 7)
         if placement.progressive_keycard:
-            floor_index = index // 2
+            # Per FLOOR, not per check. Hardcoded // 2 until 2026-08-15 - the
+            # same unrolled slots-per-floor assumption that broke the put-in
+            # guard, in Python this time. See docs/systems/third-floor-check.md.
+            floor_index = index // MARKER_SLOT_COUNT
             block[FLOOR_KEYCARD_MASK_OFFSET + floor_index // 8] |= 1 << (floor_index & 7)
 
     for slot, text in (
@@ -3973,7 +4986,19 @@ def build_player_ppf(
     seed_block: bytes,
     description: str,
     floor_pages: Sequence[bytes] = (),
+    spawn_tables: Sequence[bytes] = (),
+    carrier_system: bool = True,
 ) -> bytes:
+    """`carrier_system=False` drops ONE word: the retarget of the floor
+    population routine's first `jal random_range`, which is what forces the
+    carrier spawn. Nothing else needs removing, and that is the point of taking
+    this switch here rather than anywhere else. The claim, AI and draw stubs
+    all key on state the forced spawn raises (`claiming`, slot 15, the held
+    marker halfword), so with no forced spawn they run their ordinary-monster
+    paths - the same paths they already run for every non-carrier on a
+    carrier seed. Leaving them installed keeps the two builds one word apart
+    instead of four, which is a much smaller thing to reason about."""
+
     if len(base_ppf) < PPF_HEADER_SIZE or base_ppf[:4] != b"PPF1":
         raise ValueError("The packaged Azure Dreams base patch is not a PPF1 patch.")
     if len(seed_block) != SEED_BLOCK_SIZE:
@@ -4009,6 +5034,61 @@ def build_player_ppf(
         raw_offset = (DUNGEON_BIN_BASE_LBA + sector) * RAW_SECTOR_SIZE + 24 + within
         patch.extend(struct.pack("<IB", raw_offset, 4) + redirect)
 
+    # The per-floor monster spawn tables, when the seed randomised them.
+    # 32 bytes each, one sector apart, well inside a Form-1 sector.
+    for floor_index, table in enumerate(spawn_tables):
+        if len(table) != 32:
+            raise ValueError("A monster spawn table must be exactly 32 bytes.")
+        dungeon_offset = 0x7A_4800 + floor_index * 2048
+        sector, within = divmod(dungeon_offset, FORM1_USER_SIZE)
+        raw_offset = (
+            (DUNGEON_BIN_BASE_LBA + sector) * RAW_SECTOR_SIZE + 24 + within
+        )
+        patch.extend(struct.pack("<IB", raw_offset, len(table)) + table)
+
+    # EXPERIMENT - see CARRIER_PROBE. Delete with it. Two words:
+    # retarget the carried-item roll's only caller at 0x800A0B3C, and replace
+    # the AI dispatch's species load at 0x800AE8CC with a jump to our stub.
+    if CARRIER_PROBE:
+        carrier_hooks = [
+            (CARRIER_ROLL_HOOK_DUNGEON_OFFSET, _j(0x03, CARRIER_ROLL_STUB_ADDRESS)),
+            (CARRIER_AI_HOOK_DUNGEON_OFFSET, _j(0x02, CARRIER_AI_STUB_ADDRESS)),
+            (CARRIER_DRAW_HOOK_DUNGEON_OFFSET,
+             _j(0x03, CARRIER_DRAW_STUB_ADDRESS)),
+        ]
+        if carrier_system:
+            carrier_hooks.append(
+                (CARRIER_SPAWN_HOOK_DUNGEON_OFFSET,
+                 _j(0x03, CARRIER_FORCED_STUB_ADDRESS))
+            )
+        for dungeon_offset, word in carrier_hooks:
+            sector, within = divmod(dungeon_offset, FORM1_USER_SIZE)
+            raw_offset = (
+                (DUNGEON_BIN_BASE_LBA + sector) * RAW_SECTOR_SIZE + 24 + within
+            )
+            patch.extend(struct.pack("<IB", raw_offset, 4) + struct.pack("<I", word))
+
+    # TEMPORARY EXPERIMENT - see PICKET_AI_EXPERIMENT. Delete with it.
+    if PICKET_AI_EXPERIMENT:
+        payload = struct.pack(
+            f"<{PICKET_AI_TABLE_ENTRIES}I",
+            *([PICKET_AI_HANDLER_ADDRESS] * PICKET_AI_TABLE_ENTRIES),
+        )
+        sector, within = divmod(PICKET_AI_TABLE_DUNGEON_OFFSET, FORM1_USER_SIZE)
+        if within + len(payload) > FORM1_USER_SIZE:
+            raise ValueError("The Picket-AI probe straddles a sector boundary.")
+        raw_offset = (DUNGEON_BIN_BASE_LBA + sector) * RAW_SECTOR_SIZE + 24 + within
+        _add_ppf_records(patch, raw_offset, payload)
+
+    # TEMPORARY EXPERIMENT - see MONSTER_RECOLOUR_EXPERIMENT. Delete with it.
+    if MONSTER_RECOLOUR_EXPERIMENT:
+        payload = struct.pack("<3I", *MONSTER_RECOLOUR_WORDS)
+        sector, within = divmod(MONSTER_RECOLOUR_DUNGEON_OFFSET, FORM1_USER_SIZE)
+        if within + len(payload) > FORM1_USER_SIZE:
+            raise ValueError("The monster-recolour probe straddles a sector boundary.")
+        raw_offset = (DUNGEON_BIN_BASE_LBA + sector) * RAW_SECTOR_SIZE + 24 + within
+        patch.extend(struct.pack("<IB", raw_offset, len(payload)) + payload)
+
     # Register the floor-page loader as the elevator-orb animator's callback:
     # the creator's `lui/addiu` pair now materializes the loader's address,
     # and the loader tail-jumps into the real animator. Same single-site
@@ -4040,6 +5120,52 @@ def build_player_ppf(
         RECEIVE_HOOK_RAW_OFFSET,
         struct.pack("<I", _j(0x03, FORCED_TRAP_STUB_ADDRESS)),
     )
+
+    # The carrying handler's own forced-trap hook: one SLUS record for the
+    # trampoline over the dead bios.c RCS string, one DUNGEON record for the
+    # call site. Both sites are vanilla on the original disc (verified
+    # 2026-08-18: SLUS raw 0x15980 is the string, DUNGEON raw 0x1C5F104 is
+    # `lhu v0,0x2(s0)` = 0x96020002) and uncovered by the base patch;
+    # _append edits in place if that ever changes. Installed unconditionally:
+    # with no traps in the pool the request byte stays zero and the
+    # trampoline is one load and a jump.
+    from . import save_removal as _save_removal
+
+    for raw_offset, data in _save_removal._iter_mode2_raw_patches(
+        _save_removal.SLUS_FILE_START_LBA,
+        iter_carrying_trap_slus_file_patches(),
+    ):
+        bonus_floor._append(patch, raw_offset, data)
+    for raw_offset, data in _save_removal._iter_mode2_raw_patches(
+        _save_removal.DUNGEON_FILE_START_LBA,
+        iter_carrying_trap_dungeon_file_patches(),
+    ):
+        bonus_floor._append(patch, raw_offset, data)
+
+    # TESTING - see BANK_B_CANARY_TEST. Delete with it. Two SLUS records: the
+    # 44-byte fill routine over the dead "$Id: intr.c" string, and the boot
+    # init's `jr ra` retargeted at it. Both sites are vanilla in the base
+    # patch; _append edits in place if that ever changes.
+    if BANK_B_CANARY_TEST:
+        from . import save_removal
+
+        for raw_offset, data in save_removal._iter_mode2_raw_patches(
+            save_removal.SLUS_FILE_START_LBA,
+            iter_bank_b_canary_slus_file_patches(),
+        ):
+            bonus_floor._append(patch, raw_offset, data)
+
+    # TESTING - see FORCE_SINGLE_ROOM_TEST. Delete with it. One instruction
+    # word in each floor-generation package copy; the site is vanilla in the
+    # base patch (verified 2026-08-16), _append edits in place if that changes.
+    if FORCE_SINGLE_ROOM_TEST:
+        from . import save_removal
+
+        for raw_offset, data in save_removal._iter_mode2_raw_patches(
+            save_removal.DUNGEON_FILE_START_LBA,
+            iter_force_single_room_dungeon_file_patches(),
+        ):
+            bonus_floor._append(patch, raw_offset, data)
 
     return bytes(patch)
 

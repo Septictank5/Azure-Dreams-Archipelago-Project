@@ -515,17 +515,26 @@ class TestSendTokenBanking(unittest.TestCase):
             patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_STATE_SIZE,
         )
 
-    def test_the_adsv_record_was_not_grown(self) -> None:
+    def test_the_adsv_record_never_reaches_its_neighbours(self) -> None:
         """0.9.84's burn: a new ADSV field landed on the shortcut carrier.
 
-        The bank is a neighbour of the token count rather than a new
-        journal field precisely so this stays true - no version bump, no
-        re-initialized saves, no chance of overrunning into a carrier that
-        something else zero-writes.
+        This used to pin the size and version, which made the lesson look
+        like "never grow ADSV". The lesson is narrower and survives growth:
+        **whatever ADSV becomes, it must not reach the three tenants above
+        it.** v4 grew the journal by moving its base DOWN into the free span
+        at 0x8001_5F00, so its end is unchanged and all three still hold.
         """
 
-        self.assertEqual(patch.PERSISTENT_STATE_SIZE, 0x2C)
-        self.assertEqual(patch.PERSISTENT_STATE_VERSION, 3)
+        end = patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_STATE_SIZE
+        for name, address in (
+            ("shortcut pending-level carrier", patch.SHORTCUT_PENDING_LEVEL_ADDRESS),
+            ("send-token count", patch.SEND_TOKEN_COUNT_ADDRESS),
+            ("send-token bank", patch.SEND_TOKEN_BANKED_ADDRESS),
+        ):
+            with self.subTest(neighbour=name):
+                self.assertLessEqual(end, address)
+        # And it must not run off the bottom of the save-backed scratch span.
+        self.assertGreaterEqual(patch.PERSISTENT_STATE_ADDRESS, 0x8001_5F00)
 
 
 if __name__ == "__main__":

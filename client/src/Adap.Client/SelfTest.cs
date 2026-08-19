@@ -586,44 +586,6 @@ internal static class SelfTest
                 townRequestFlag[0] == 0,
                 "A silent self-location receive incorrectly requested a dialogue.");
 
-            Require(
-                AzureDreamsMailbox.TrySetOutstandingFloorLocation(
-                    connectedMemory,
-                    39,
-                    1,
-                    true,
-                    out string floorLocationMessage),
-                floorLocationMessage);
-            Span<byte> outstandingLocations = stackalloc byte[AzureDreamsMailbox.FloorLocationMaskSize];
-            Require(
-                connectedMemory.TryRead(
-                    AzureDreamsMailbox.Address + AzureDreamsMailbox.OutstandingFloorLocationsOffset,
-                    outstandingLocations,
-                    out string? outstandingReadError),
-                outstandingReadError ?? "Outstanding floor-location mask read failed.");
-            Require(
-                outstandingLocations[9] == 0x20,
-                "Floor 39 location slot 1 did not map to bit 77 of the outstanding mask.");
-
-            byte[] syntheticCollectedRequests = new byte[AzureDreamsMailbox.FloorLocationMaskSize];
-            syntheticCollectedRequests[0] = 0x01;
-            Require(
-                connectedMemory.TryWrite(
-                    AzureDreamsMailbox.Address + AzureDreamsMailbox.CollectedFloorLocationRequestsOffset,
-                    syntheticCollectedRequests,
-                    out string? requestWriteError),
-                requestWriteError ?? "Synthetic collected-request write failed.");
-            Span<byte> collectedRequests = stackalloc byte[AzureDreamsMailbox.FloorLocationMaskSize];
-            Require(
-                AzureDreamsMailbox.TryReadCollectedFloorLocationRequests(
-                    connectedMemory,
-                    collectedRequests,
-                    out string collectedRequestMessage),
-                collectedRequestMessage);
-            Require(
-                collectedRequests[0] == 0x01,
-                "The game-owned collected-request mask was not read back correctly.");
-
             // Raw read: these suites run before the persistent-state headers
             // are staged, so the guarded accessor would reject the build.
             _cursorBeforeGiftQueueTest = ReadRawReceiveCursor(connectedMemory);
@@ -667,21 +629,6 @@ internal static class SelfTest
                     out clearanceMessage),
                 clearanceMessage);
             Require(updatedClearance == 5, "Mailbox clearance was not updated without reinitialization.");
-            Require(
-                AzureDreamsMailbox.TryReadOutstandingFloorLocations(
-                    connectedMemory,
-                    outstandingLocations,
-                    out floorLocationMessage),
-                floorLocationMessage);
-            Require(
-                AzureDreamsMailbox.TryReadCollectedFloorLocationRequests(
-                    connectedMemory,
-                    collectedRequests,
-                    out collectedRequestMessage),
-                collectedRequestMessage);
-            Require(
-                outstandingLocations[9] == 0x20 && collectedRequests[0] == 0x01,
-                "Updating clearance unexpectedly reset the floor-location masks.");
             Require(
                 AzureDreamsMailbox.TrySetElevatorClearance(
                     connectedMemory,
@@ -844,6 +791,7 @@ internal static class SelfTest
             // The persistent state header and seeded memory top are now
             // staged, which the keycard clearance level depends on.
             TestKeycardsCutInLine(connectedMemory);
+            TestTemperSandsCutInLine(connectedMemory);
             TestLiveFloorFollowsTheLoadedMode(connectedMemory);
 
             Require(
@@ -874,12 +822,14 @@ internal static class SelfTest
                     new byte[8],
                     out string? towerHeaderClearError),
                 towerHeaderClearError ?? "Could not unload the synthetic tower mailbox.");
+            // The retired +0x80..+0x9B floor-location fields: nothing may write
+            // them any more, loaded mailbox or not (they were the v3 mask mirror).
             byte[] townStackMaskSentinel = Enumerable.Repeat(
                 (byte)0xa5,
-                AzureDreamsReceiveState.LocationMaskSize).ToArray();
+                AzureDreamsMailbox.RetiredFloorLocationFieldsSize).ToArray();
             Require(
                 connectedMemory.TryWrite(
-                    AzureDreamsMailbox.Address + AzureDreamsMailbox.CollectedFloorLocationRequestsOffset,
+                    AzureDreamsMailbox.Address + AzureDreamsMailbox.RetiredFloorLocationFieldsOffset,
                     townStackMaskSentinel,
                     out string? townStackWriteError),
                 townStackWriteError ?? "Could not stage the town stack mask sentinel.");
@@ -924,14 +874,22 @@ internal static class SelfTest
                     out developmentClearanceMessage),
                 developmentClearanceMessage);
 
+            // Floor 1 slot 0, floor 26 slot 1 and floor 39 slot 2 (the carrier's):
+            // byte = floor-1, bit = slot, in the ADSV v4 journal.
+            long[] mergedLocations =
+            [
+                AzureDreamsReceiveState.LocationIdBase,
+                AzureDreamsReceiveState.LocationIdBase + 25 * AzureDreamsReceiveState.SlotsPerFloor + 1,
+                AzureDreamsReceiveState.LocationIdBase + AzureDreamsReceiveState.LocationCount - 1,
+            ];
             Require(
                 AzureDreamsReceiveState.TryMergeCheckedLocations(
                     connectedMemory,
-                    [AzureDreamsReceiveState.LocationIdBase, AzureDreamsReceiveState.LocationIdBase + 77],
+                    mergedLocations,
                     out int newlyRecorded,
                     out string mergeMessage),
                 mergeMessage);
-            Require(newlyRecorded == 2, "Server-check merge did not record exactly two new locations.");
+            Require(newlyRecorded == 3, "Server-check merge did not record exactly three new locations.");
             Span<byte> persistentMask = stackalloc byte[AzureDreamsReceiveState.LocationMaskSize];
             Require(
                 AzureDreamsReceiveState.TryReadCollectedLocationMask(
@@ -940,20 +898,30 @@ internal static class SelfTest
                     out string persistentMaskMessage),
                 persistentMaskMessage);
             Require(
-                AzureDreamsReceiveState.GetCollectedLocationIds(persistentMask).SequenceEqual(
-                    [AzureDreamsReceiveState.LocationIdBase, AzureDreamsReceiveState.LocationIdBase + 77]),
+                persistentMask[0] == 0x01 && persistentMask[25] == 0x02 && persistentMask[38] == 0x04 &&
+                persistentMask.ToArray().Sum(b => (int)b) == 7,
+                "The v4 journal did not land on byte floor-1, bit slot.");
+            Require(
+                AzureDreamsReceiveState.GetCollectedLocationIds(persistentMask).SequenceEqual(mergedLocations),
                 "Persistent location mask did not round-trip to location IDs.");
+            Require(
+                AzureDreamsReceiveState.TryMergeCheckedLocations(
+                    connectedMemory,
+                    mergedLocations,
+                    out newlyRecorded,
+                    out mergeMessage) && newlyRecorded == 0,
+                "A second merge of the same checks was not a no-op.");
             Span<byte> observedTownStackMask = stackalloc byte[
-                AzureDreamsReceiveState.LocationMaskSize];
+                AzureDreamsMailbox.RetiredFloorLocationFieldsSize];
             Require(
                 connectedMemory.TryRead(
-                    AzureDreamsMailbox.Address + AzureDreamsMailbox.CollectedFloorLocationRequestsOffset,
+                    AzureDreamsMailbox.Address + AzureDreamsMailbox.RetiredFloorLocationFieldsOffset,
                     observedTownStackMask,
                     out string? townStackReadError),
                 townStackReadError ?? "Could not read the town stack mask sentinel.");
             Require(
                 observedTownStackMask.SequenceEqual(townStackMaskSentinel),
-                "Server-check reconciliation wrote through the unloaded tower mailbox into town stack.");
+                "Server-check reconciliation wrote into the retired mailbox mirror.");
 
             Require(
                 AzureDreamsReceiveState.TryMergeCheckedShopLocations(
@@ -1046,7 +1014,7 @@ internal static class SelfTest
                 goldSeedError ?? "Could not clear the gold counter.");
 
             // The durable gold-granted counter (journal v3): the eager grant's
-            // exactly-once memory. Round-trips through ADSV +0x28 and starts
+            // exactly-once memory. Round-trips through the ADSV gold-granted word and starts
             // this suite at zero so the pristine test above stays honest.
             Require(
                 AzureDreamsReceiveState.TryReadGoldGrantedCount(
@@ -1196,12 +1164,14 @@ internal static class SelfTest
         TestPlayerYamlCreation();
         TestLaunchAndAssociation();
         TestTowerProgressView();
-        TestCompactMode();
+        TestTrackerWindow();
+        TestActivityFeedIsBounded();
 
         Console.WriteLine(
             "PASS: emulator transport, game probe, mailbox, HUD, durable AP state, " +
-            "native item delivery, town checkpoints, tower view, compact mode, " +
-            "PPF patching, player settings, and player YAML creation");
+            "native item delivery, town checkpoints, tower view, tracker window, " +
+            "bounded activity feed, PPF patching, player settings, and player " +
+            "YAML creation");
         return 0;
     }
 
@@ -1565,6 +1535,81 @@ internal static class SelfTest
     }
 
     /// <summary>
+    /// The blacksmith's sands apply from the full received history to the
+    /// two temper level bytes, exactly as keycards apply to clearance:
+    /// eagerly, idempotently, independently of the receive cursor, and each
+    /// colour to its own byte - and the ball charger's White Sand to the
+    /// level byte beside ADSV the same way.
+    /// </summary>
+    private static void TestTemperSandsCutInLine(DuckStationMemory memory)
+    {
+        Require(
+            AzureDreamsReceiveState.TrySetTemperLevels(memory, 0, 0, out string resetMessage),
+            resetMessage);
+        Require(
+            AzureDreamsReceiveState.TrySetBallChargeLevel(memory, 0, out resetMessage),
+            resetMessage);
+
+        long red = AzureDreamsArchipelagoClient.RedSandItemIdForTest;
+        long blue = AzureDreamsArchipelagoClient.BlueSandItemIdForTest;
+        long white = AzureDreamsArchipelagoClient.WhiteSandItemIdForTest;
+        long inventoryItem = AzureDreamsItemManifest.EncodeProtocolItemId(1, 1, 0);
+        Require(
+            red == 0x0AD0_5020 && blue == 0x0AD0_5040 && white == 0x0AD0_5060,
+            "The sand protocol ids drifted from the apworld's (category 10, ids 1, 2 and 3).");
+        Require(
+            AzureDreamsReceiveState.BallChargeLevelAddress == 0x8001_5F90,
+            "The ball charge level byte moved away from the word below ADSV.");
+
+        long[] history = [inventoryItem, red, blue, red, white, white, white];
+        Require(
+            AzureDreamsArchipelagoClient.SynchronizeTemperSands(memory, history, out string syncMessage),
+            syncMessage);
+        Require(
+            AzureDreamsReceiveState.TryReadTemperLevels(
+                memory, out byte weapon, out byte shield, out string readMessage) &&
+            weapon == 2 && shield == 1,
+            $"Two Red and one Blue Sand did not become weapon 2 / shield 1 ({readMessage}).");
+        Require(
+            AzureDreamsReceiveState.TryReadBallChargeLevel(memory, out byte charge, out readMessage) &&
+            charge == 3,
+            $"Three White Sands did not become ball charge level 3 ({readMessage}).");
+
+        Require(
+            AzureDreamsArchipelagoClient.SynchronizeTemperSands(memory, history, out syncMessage),
+            syncMessage);
+        Require(
+            AzureDreamsReceiveState.TryReadTemperLevels(memory, out weapon, out shield, out _) &&
+            weapon == 2 && shield == 1,
+            "A repeat sand sync changed the temper levels.");
+        Require(
+            AzureDreamsReceiveState.TryReadBallChargeLevel(memory, out charge, out _) && charge == 3,
+            "A repeat sand sync changed the ball charge level.");
+        Require(
+            AzureDreamsArchipelagoClient.BallChargeUsesForLevel(0) == 0 &&
+            AzureDreamsArchipelagoClient.BallChargeUsesForLevel(1) == 1 &&
+            AzureDreamsArchipelagoClient.BallChargeUsesForLevel(3) == 3 &&
+            AzureDreamsTowerProgress.BallChargeUsesPerVisit.AsSpan().SequenceEqual(
+                (int[])[0, 1, 2, 3]) &&
+            AzureDreamsTowerProgress.BallChargeCeiling == 10,
+            "The ball charger's per-visit allowance drifted from ball_charger.USES_BY_LEVEL.");
+
+        long[] overflow = new long[AzureDreamsReceiveState.MaximumTemperLevel + 1];
+        Array.Fill(overflow, red);
+        Require(
+            !AzureDreamsArchipelagoClient.SynchronizeTemperSands(memory, overflow, out _),
+            "More Red Sands than the maximum were accepted.");
+
+        // The intro flags share the word: setting the levels leaves them alone.
+        Require(
+            AzureDreamsReceiveState.TrySetTemperLevels(memory, 0, 0, out resetMessage),
+            resetMessage);
+        Require(
+            AzureDreamsReceiveState.TrySetBallChargeLevel(memory, 0, out resetMessage),
+            resetMessage);
+    }
+
+    /// <summary>
     /// Line-cutters in the pending history must not chop the town batch.
     ///
     /// <para>Pins the 2026-08-06 one-item-per-conversation report: the append
@@ -1603,6 +1648,19 @@ internal static class SelfTest
                 .SequenceEqual(new uint[] { 0, 2 }),
             "A trap item was staged for town delivery; it must cut the " +
             "line like a keycard (the spring is the location-check path's).");
+
+        // The blacksmith's sands are line-cutters too: levels, not inventory.
+        long[] withSands = [
+            item,
+            AzureDreamsArchipelagoClient.RedSandItemIdForTest,
+            AzureDreamsArchipelagoClient.BlueSandItemIdForTest,
+            item,
+        ];
+        Require(
+            AzureDreamsArchipelagoClient.PlanTownQueueAppends(withSands, 0, 16)
+                .SequenceEqual(new uint[] { 0, 3 }),
+            "A temper sand was staged for town delivery; it must raise the " +
+            "smith's level and never enter the bag.");
 
         long[] interleaved = [item, keycard, item, gold, item, keycard, gold, item];
         Require(
@@ -1669,7 +1727,13 @@ internal static class SelfTest
     /// <summary>
     /// The forced-trap request-byte protocol: one write in flight, the head
     /// popped only when the stub is seen to consume it, the next trap
-    /// following in the same pump.
+    /// following in the same pump - and, since 2026-08-18, a trap that has
+    /// left the floor it was picked up on being DROPPED rather than carried.
+    ///
+    /// <para>The failure that rule exists for: the first frame of a freshly
+    /// loaded floor is Koh's turn, so a trap sprung there spends it and the
+    /// floor's monsters move first, against a player who has not seen the
+    /// room yet. A trap arriving late always arrives exactly there.</para>
     /// </summary>
     private static void TestForcedTrapPump()
     {
@@ -1684,9 +1748,10 @@ internal static class SelfTest
                 AzureDreamsGiftService.TowerGiftMailboxSizeForTest,
             "The forced-trap request byte overlaps the ADGT tower-gift record.");
         var memory = new FakeEmulatorMemory();
+        StandOnFloor(memory, 7);
         var traps = new AzureDreamsArchipelagoClient.ForcedTrapQueue();
-        traps.Pending.Add(11); // poison
-        traps.Pending.Add(7);  // bomb
+        traps.Pending.Add(new AzureDreamsArchipelagoClient.PendingTrap(11, 7)); // poison
+        traps.Pending.Add(new AzureDreamsArchipelagoClient.PendingTrap(7, 7));  // bomb
 
         AzureDreamsArchipelagoClient.PumpForcedTraps(memory, traps);
         Require(
@@ -1722,7 +1787,105 @@ internal static class SelfTest
         Require(
             memory.ReadByte(requestAddress) == 4,
             "The pump disturbed a request byte it did not write.");
+        memory.WriteByte(requestAddress, 0);
+
+        // Leaving the floor strands the trap: the elevator, the walk back to
+        // town, a death, a reload. All four look the same from here, and all
+        // four would otherwise hand the trap to the next floor's first frame.
+        traps.Pending.Add(new AzureDreamsArchipelagoClient.PendingTrap(11, 7));
+        AzureDreamsArchipelagoClient.PumpForcedTraps(memory, traps);
+        Require(
+            memory.ReadByte(requestAddress) == 11 && traps.WriteInFlight,
+            "A trap picked up on the live floor was not written out.");
+        StandOnFloor(memory, 8);
+        AzureDreamsArchipelagoClient.PumpForcedTraps(memory, traps);
+        Require(
+            traps.Pending.Count == 0 && !traps.WriteInFlight &&
+            memory.ReadByte(requestAddress) == 0,
+            "A trap survived the floor it was picked up on, and its request " +
+            "byte was left armed for the next floor.");
+
+        // Back in town, nothing may be armed at all.
+        traps.Pending.Add(new AzureDreamsArchipelagoClient.PendingTrap(9, 8));
+        LeaveTheTower(memory);
+        AzureDreamsArchipelagoClient.PumpForcedTraps(memory, traps);
+        Require(
+            traps.Pending.Count == 0 && memory.ReadByte(requestAddress) == 0,
+            "A trap was still armed after the player left the tower.");
+
+        // The arming rule, which is the half that decides whether a trap ever
+        // reaches this queue. Each refusal below is a way a trap used to
+        // arrive at a moment it did not belong to.
+        Require(
+            AzureDreamsArchipelagoClient.IsTrapSpringable(
+                armingPrimed: true,
+                alreadyInSave: false,
+                pickupFloor: 7,
+                floorAtLastPoll: 7,
+                out _),
+            "A live pickup on the floor the player is standing on was refused.");
+        Require(
+            !AzureDreamsArchipelagoClient.IsTrapSpringable(
+                armingPrimed: false,
+                alreadyInSave: false,
+                pickupFloor: 7,
+                floorAtLastPoll: 7,
+                out _),
+            "The first look at an attached save armed a trap; everything in a " +
+            "save the client has not seen before is history, not a pickup.");
+        Require(
+            !AzureDreamsArchipelagoClient.IsTrapSpringable(
+                armingPrimed: true,
+                alreadyInSave: true,
+                pickupFloor: 7,
+                floorAtLastPoll: 7,
+                out _),
+            "A check collected offline armed its trap when the client finally " +
+            "reported it - the exact shape of the death on a loaded floor.");
+        Require(
+            !AzureDreamsArchipelagoClient.IsTrapSpringable(
+                armingPrimed: true,
+                alreadyInSave: false,
+                pickupFloor: 0,
+                floorAtLastPoll: 0,
+                out _),
+            "A trap armed from outside the tower, where there is no floor to " +
+            "spring it on.");
+        Require(
+            !AzureDreamsArchipelagoClient.IsTrapSpringable(
+                armingPrimed: true,
+                alreadyInSave: false,
+                pickupFloor: 8,
+                floorAtLastPoll: 7,
+                out _),
+            "A pickup noticed only after the player had changed floors armed " +
+            "its trap for the floor they had just arrived on.");
+
+        // The reattach case, which is the one that killed a run: the queue and
+        // the observed-checks baseline both belong to the attached game.
+        traps.Pending.Add(new AzureDreamsArchipelagoClient.PendingTrap(7, 3));
+        traps.ObservedGameChecks = [1, 2, 3];
+        traps.WriteInFlight = true;
+        traps.FloorAtLastPoll = 3;
+        traps.ForgetGameSession();
+        Require(
+            traps.Pending.Count == 0 && !traps.WriteInFlight &&
+            traps.ObservedGameChecks is null && traps.FloorAtLastPoll == 0,
+            "Forgetting the attached game left a trap or a stale check baseline behind.");
     }
+
+    /// <summary>Puts the fake game in the tower, on a floor.</summary>
+    private static void StandOnFloor(FakeEmulatorMemory memory, int floor)
+    {
+        memory.WriteByte(
+            AzureDreamsTownCheckpoint.LoadedModeAddress,
+            AzureDreamsTownCheckpoint.TowerMode);
+        memory.WriteByte(AzureDreamsTowerProgress.CurrentFloorAddress, (byte)floor);
+        memory.WriteByte(AzureDreamsTowerProgress.CurrentFloorAddress + 1, 0);
+    }
+
+    private static void LeaveTheTower(FakeEmulatorMemory memory) =>
+        memory.WriteByte(AzureDreamsTownCheckpoint.LoadedModeAddress, 0);
 
     /// <summary>
     /// The town receive queue Nada drains from inside her own conversation.
@@ -2540,7 +2703,9 @@ internal static class SelfTest
                 AzureDreamsTownCheckpoint.TryRestore(
                     memory,
                     identity,
+                    null,
                     out AzureDreamsCheckpointMetadata restoredDirectMetadata,
+                    out _,
                     out checkpointMessage,
                     directDirectory),
                 checkpointMessage);
@@ -2552,6 +2717,81 @@ internal static class SelfTest
                 restoredDirectMetadata.CreatedUnixMilliseconds ==
                     directMetadata.CreatedUnixMilliseconds,
                 "The validated town checkpoint did not restore the save-backed RAM block.");
+
+            // Server-confirmed checks land IN the restored block, before the
+            // game can rebuild a floor from it. Restore the checkpoint with
+            // three known checks the capture did not have (two tower slots -
+            // one of them a carrier's - and one shop row): the mask reads
+            // merged the moment the write lands, the count comes back, and the
+            // checkpoint FILE itself is untouched.
+            {
+                int journalOffset = checked((int)(
+                    AzureDreamsReceiveState.PersistentStateAddress +
+                    AzureDreamsReceiveState.PersistentLocationMaskOffset -
+                    AzureDreamsTownCheckpoint.SaveBlockAddress));
+                int shopOffset = checked((int)(
+                    AzureDreamsReceiveState.PersistentStateAddress +
+                    AzureDreamsReceiveState.PersistentShopMaskOffset -
+                    AzureDreamsTownCheckpoint.SaveBlockAddress));
+                byte[] capturedJournal = directPayload
+                    .AsSpan(journalOffset, AzureDreamsReceiveState.LocationMaskSize).ToArray();
+                uint capturedShop = BinaryPrimitives.ReadUInt32LittleEndian(directPayload.AsSpan(shopOffset));
+                Require(
+                    (capturedJournal[6] & 0x04) == 0 && (capturedJournal[19] & 0x01) == 0 &&
+                    (capturedShop & (1u << 4)) == 0,
+                    "The checkpoint fixture already held the bits this test merges.");
+                long[] knownChecks =
+                [
+                    AzureDreamsReceiveState.LocationIdBase + 6 * AzureDreamsReceiveState.SlotsPerFloor + 2,
+                    AzureDreamsReceiveState.LocationIdBase + 19 * AzureDreamsReceiveState.SlotsPerFloor,
+                    AzureDreamsReceiveState.ShopLocationIdBase + 4,
+                    AzureDreamsReceiveState.LocationIdBase + 6 * AzureDreamsReceiveState.SlotsPerFloor + 2, // repeat
+                    0x1234_5678, // somebody else's location
+                ];
+                Require(
+                    AzureDreamsTownCheckpoint.TryRestore(
+                        memory,
+                        identity,
+                        knownChecks,
+                        out _,
+                        out int mergedAtRestore,
+                        out checkpointMessage,
+                        directDirectory),
+                    checkpointMessage);
+                Require(mergedAtRestore == 3, $"Merged {mergedAtRestore} checks at restore; expected 3.");
+                byte[] journalAfter = new byte[AzureDreamsReceiveState.LocationMaskSize];
+                Span<byte> shopAfter = stackalloc byte[AzureDreamsReceiveState.ShopLocationMaskSize];
+                Require(
+                    memory.TryRead(
+                        AzureDreamsReceiveState.PersistentStateAddress +
+                            AzureDreamsReceiveState.PersistentLocationMaskOffset,
+                        journalAfter,
+                        out memoryError) &&
+                    memory.TryRead(
+                        AzureDreamsReceiveState.PersistentStateAddress +
+                            AzureDreamsReceiveState.PersistentShopMaskOffset,
+                        shopAfter,
+                        out memoryError),
+                    memoryError ?? "Could not read the journal after the merged restore.");
+                byte[] expectedJournal = (byte[])capturedJournal.Clone();
+                expectedJournal[6] |= 0x04;
+                expectedJournal[19] |= 0x01;
+                Require(
+                    journalAfter.AsSpan().SequenceEqual(expectedJournal) &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(shopAfter) == (capturedShop | (1u << 4)),
+                    "The restore did not merge the server checks into the restored block.");
+                Require(
+                    AzureDreamsTownCheckpoint.TryRestore(
+                        memory, identity, null, out _, out int mergedNone, out checkpointMessage, directDirectory) &&
+                    mergedNone == 0 &&
+                    memory.TryRead(
+                        AzureDreamsReceiveState.PersistentStateAddress +
+                            AzureDreamsReceiveState.PersistentLocationMaskOffset,
+                        journalAfter,
+                        out memoryError) &&
+                    journalAfter.AsSpan().SequenceEqual(capturedJournal),
+                    checkpointMessage.Length > 0 ? checkpointMessage : "A restore without a server view did not start from the captured journal.");
+            }
 
             // A TOWER checkpoint restores AND arms the native resume. Both
             // halves matter: restoring a tower block without the arm walks the
@@ -2591,6 +2831,8 @@ internal static class SelfTest
                     AzureDreamsTownCheckpoint.TryRestore(
                         memory,
                         identity,
+                        null,
+                        out _,
                         out _,
                         out checkpointMessage,
                         towerDirectory),
@@ -2625,7 +2867,7 @@ internal static class SelfTest
                     memoryError ?? "Could not clear the resume trigger.");
                 Require(
                     AzureDreamsTownCheckpoint.TryRestore(
-                        memory, identity, out _, out checkpointMessage, directDirectory),
+                        memory, identity, null, out _, out _, out checkpointMessage, directDirectory),
                     checkpointMessage);
                 Require(
                     memory.TryRead(
@@ -2639,6 +2881,289 @@ internal static class SelfTest
             finally
             {
                 try { Directory.Delete(towerDirectory, recursive: true); } catch { }
+            }
+
+            // A tower-floor capture waits for the shortcut's level grant, and
+            // stores Koh as he LIVES rather than as the game last mirrored him.
+            //
+            // The bug this pins: Uncle's warp to floor 10/20/30 levels Koh from
+            // a wrapper on the floor's monster-levelling loop, near the END of
+            // the build, while the floor number, the CD queue and the mode-load
+            // flag all read ready near the START of it. A capture in between
+            // stored the level the player left town with, and the resume handed
+            // it back.
+            string shortcutDirectory = Path.Combine(
+                Path.GetTempPath(), "adap-selftest-shortcut-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(shortcutDirectory);
+            try
+            {
+                byte[] liveStats = new byte[AzureDreamsTownCheckpoint.UnitStatsRecordSize];
+                liveStats[AzureDreamsTownCheckpoint.UnitStatsLevelOffset] = 12;
+                liveStats[AzureDreamsTownCheckpoint.UnitStatsMaximumHpOffset] = 60;
+                liveStats[0] = 24;                                   // ATK
+                byte[] staleMirror = new byte[AzureDreamsTownCheckpoint.UnitStatsRecordSize];
+                staleMirror[AzureDreamsTownCheckpoint.UnitStatsLevelOffset] = 1;
+                staleMirror[AzureDreamsTownCheckpoint.UnitStatsMaximumHpOffset] = 16;
+                Span<byte> floorBytes = stackalloc byte[2];
+                BinaryPrimitives.WriteUInt16LittleEndian(floorBytes, 10);
+                Require(
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.LoadedModeAddress,
+                        [AzureDreamsTownCheckpoint.TowerMode],
+                        out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.CurrentFloorAddress, floorBytes, out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.ModeLoadPendingAddress, [0], out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.CdQueueHeadAddress, [0x21, 0x21], out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.LiveUnitStatsAddress, liveStats, out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.SavedUnitStatsAddress, staleMirror, out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.ShortcutPendingLevelAddress, [10], out memoryError),
+                    memoryError ?? "Could not stage a shortcut arrival on floor 10.");
+
+                var shortcutCoordinator =
+                    new AzureDreamsTownCheckpointCoordinator(shortcutDirectory);
+                Require(
+                    shortcutCoordinator.TryObserveAndCommitBoundary(
+                        memory,
+                        identity,
+                        out _,
+                        out AzureDreamsCheckpointMetadata? tooEarly,
+                        out checkpointMessage) &&
+                    tooEarly is null &&
+                    !File.Exists(AzureDreamsTownCheckpoint.GetSnapshotPath(identity, shortcutDirectory)),
+                    "A tower-floor checkpoint was taken while the shortcut's level grant was "
+                    + "still pending; it would store the level the player left town with.");
+
+                Require(
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.ShortcutPendingLevelAddress, [0], out memoryError),
+                    memoryError ?? "Could not clear the shortcut pending level.");
+                Require(
+                    shortcutCoordinator.TryObserveAndCommitBoundary(
+                        memory,
+                        identity,
+                        out _,
+                        out AzureDreamsCheckpointMetadata? granted,
+                        out checkpointMessage) &&
+                    granted?.Reason == AzureDreamsCheckpointReason.TowerFloorEntry,
+                    checkpointMessage.Length > 0
+                        ? checkpointMessage
+                        : "No tower-floor checkpoint was taken once the level grant had run.");
+                Require(
+                    AzureDreamsTownCheckpoint.TryRead(
+                        AzureDreamsTownCheckpoint.GetSnapshotPath(identity, shortcutDirectory),
+                        identity,
+                        out byte[] shortcutPayload,
+                        out _,
+                        out checkpointMessage),
+                    checkpointMessage);
+                int mirrorOffset = checked((int)(
+                    AzureDreamsTownCheckpoint.SavedUnitStatsAddress -
+                    AzureDreamsTownCheckpoint.SaveBlockAddress));
+                Require(
+                    shortcutPayload.AsSpan(
+                        mirrorOffset, AzureDreamsTownCheckpoint.UnitStatsRecordSize)
+                        .SequenceEqual(liveStats),
+                    "A tower-floor checkpoint stored the game's stale stats mirror instead of "
+                    + "Koh as he lives; a resume would come back at the wrong level.");
+
+                // Only one capture per floor, and a live record that is not a
+                // plausible Koh leaves the game's own mirror alone.
+                Require(
+                    shortcutCoordinator.TryObserveAndCommitBoundary(
+                        memory, identity, out _, out AzureDreamsCheckpointMetadata? again, out _) &&
+                    again is null,
+                    "The same tower floor was captured twice.");
+                Require(
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.LiveUnitStatsAddress,
+                        new byte[AzureDreamsTownCheckpoint.UnitStatsRecordSize],
+                        out memoryError),
+                    memoryError ?? "Could not blank the live stats.");
+                Require(
+                    AzureDreamsTownCheckpoint.TryCapture(
+                        memory,
+                        identity,
+                        AzureDreamsCheckpointReason.TowerFloorEntry,
+                        out _,
+                        out checkpointMessage,
+                        shortcutDirectory) &&
+                    AzureDreamsTownCheckpoint.TryRead(
+                        AzureDreamsTownCheckpoint.GetSnapshotPath(identity, shortcutDirectory),
+                        identity,
+                        out byte[] blankedPayload,
+                        out _,
+                        out checkpointMessage) &&
+                    blankedPayload.AsSpan(
+                        mirrorOffset, AzureDreamsTownCheckpoint.UnitStatsRecordSize)
+                        .SequenceEqual(staleMirror),
+                    "A live record that is not a plausible Koh overwrote the saved mirror.");
+
+                // --- what escapes the world must not roll back --------------
+                //
+                // A send puts an item in another player's world and spends a
+                // token. Restoring the block as captured hands both back, and
+                // the recipient keeps their copy - so the SAVED checkpoint is
+                // edited instead of being retaken, which would cost the player
+                // the floor they are part-way through.
+                byte[] sent = [0x06, 0x04, 0x09, 0x00];              // a 9-charge Water Ball
+                byte[] neverHeld = [0x2a, 0x0f, 0x03, 0x00];
+                uint firstSlot = AzureDreamsTownCheckpoint.InventoryDescriptorAddress;
+                Span<byte> order = stackalloc byte[12];
+                BinaryPrimitives.WriteUInt32LittleEndian(order, firstSlot);
+                BinaryPrimitives.WriteUInt32LittleEndian(order[4..], firstSlot + 4);
+                BinaryPrimitives.WriteUInt32LittleEndian(order[8..], firstSlot + 8);
+                Span<byte> tokens = stackalloc byte[8];
+                BinaryPrimitives.WriteUInt32LittleEndian(tokens, 3);
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    tokens[4..], AzureDreamsReceiveState.SendTokenMagic);
+                Require(
+                    memory.TryWrite(firstSlot, [0x01, 0x04, 0x04, 0x00], out memoryError) &&
+                    memory.TryWrite(firstSlot + 4, sent, out memoryError) &&
+                    memory.TryWrite(firstSlot + 8, [0x03, 0x04, 0x00, 0x00], out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsTownCheckpoint.InventoryOrderAddress, order, out memoryError) &&
+                    memory.TryWrite(
+                        AzureDreamsReceiveState.SendTokenCountAddress, tokens, out memoryError),
+                    memoryError ?? "Could not stage a bag and a token count.");
+                Require(
+                    AzureDreamsTownCheckpoint.TryCapture(
+                        memory,
+                        identity,
+                        AzureDreamsCheckpointReason.TowerFloorEntry,
+                        out _,
+                        out checkpointMessage,
+                        shortcutDirectory),
+                    checkpointMessage);
+
+                // Sent with four charges left of the nine it had at floor entry:
+                // identity is the id and the category, the rest is floor state.
+                Require(
+                    AzureDreamsTownCheckpoint.TryAmendForSentItem(
+                        identity, [sent[0], sent[1], 0x04, 0x00],
+                        out bool editedInventory, out checkpointMessage,
+                        shortcutDirectory) &&
+                    editedInventory,
+                    checkpointMessage.Length > 0
+                        ? checkpointMessage
+                        : "Sending an item the checkpoint was carrying did not edit it out.");
+                Require(
+                    AzureDreamsTownCheckpoint.TryRead(
+                        AzureDreamsTownCheckpoint.GetSnapshotPath(identity, shortcutDirectory),
+                        identity,
+                        out byte[] amended,
+                        out AzureDreamsCheckpointMetadata amendedMetadata,
+                        out checkpointMessage),
+                    checkpointMessage);
+                int descriptorBase = checked((int)(
+                    firstSlot - AzureDreamsTownCheckpoint.SaveBlockAddress));
+                int orderBase = checked((int)(
+                    AzureDreamsTownCheckpoint.InventoryOrderAddress -
+                    AzureDreamsTownCheckpoint.SaveBlockAddress));
+                int tokenBase = checked((int)(
+                    AzureDreamsReceiveState.SendTokenCountAddress -
+                    AzureDreamsTownCheckpoint.SaveBlockAddress));
+                Require(
+                    amended.AsSpan(descriptorBase + 4, 4).SequenceEqual(new byte[4]) &&
+                    amended.AsSpan(descriptorBase, 4).SequenceEqual((byte[])[0x01, 0x04, 0x04, 0x00]) &&
+                    amended.AsSpan(descriptorBase + 8, 4).SequenceEqual((byte[])[0x03, 0x04, 0x00, 0x00]),
+                    "The amendment removed the wrong descriptor.");
+                Require(
+                    BinaryPrimitives.ReadUInt32LittleEndian(amended.AsSpan(orderBase)) == firstSlot &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(amended.AsSpan(orderBase + 4)) == firstSlot + 8 &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(amended.AsSpan(orderBase + 8)) == 0,
+                    "The amendment did not close the display order over the sent item.");
+                Require(
+                    BinaryPrimitives.ReadUInt32LittleEndian(amended.AsSpan(tokenBase)) == 2,
+                    "The amendment did not spend the send token in the stored checkpoint.");
+                Require(
+                    amendedMetadata.Reason == AzureDreamsCheckpointReason.TowerFloorEntry,
+                    "The amendment rewrote the checkpoint's reason.");
+
+                // An item found on this floor and sent from it was never in the
+                // checkpoint, so the token is the whole correction.
+                Require(
+                    AzureDreamsTownCheckpoint.TryAmendForSentItem(
+                        identity, neverHeld, out bool editedNothing, out checkpointMessage,
+                        shortcutDirectory) &&
+                    !editedNothing &&
+                    AzureDreamsTownCheckpoint.TryRead(
+                        AzureDreamsTownCheckpoint.GetSnapshotPath(identity, shortcutDirectory),
+                        identity,
+                        out byte[] tokenOnly,
+                        out _,
+                        out checkpointMessage) &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(tokenOnly.AsSpan(tokenBase)) == 1 &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(tokenOnly.AsSpan(orderBase + 4)) == firstSlot + 8,
+                    checkpointMessage.Length > 0
+                        ? checkpointMessage
+                        : "Sending an item the checkpoint never held still edited the bag.");
+
+                // --- what enters the world is offered again -----------------
+                //
+                // Gift delivery is recorded on the Archipelago server, which a
+                // memory restore cannot reach, so the watermark rides beside
+                // the snapshot and is handed back on a restore.
+                const string watermark = "{\"senders\":{\"2:abcd\":7},\"ack\":2147483652}";
+                Require(
+                    AzureDreamsTownCheckpoint.TryCapture(
+                        memory,
+                        identity,
+                        AzureDreamsCheckpointReason.TowerFloorEntry,
+                        out _,
+                        out checkpointMessage,
+                        shortcutDirectory,
+                        watermark),
+                    checkpointMessage);
+                string? handedBack = "not called";
+                Require(
+                    AzureDreamsTownCheckpoint.TryRestore(
+                        memory,
+                        identity,
+                        null,
+                        out _,
+                        out _,
+                        out checkpointMessage,
+                        shortcutDirectory,
+                        value => handedBack = value) &&
+                    handedBack == watermark,
+                    checkpointMessage.Length > 0
+                        ? checkpointMessage
+                        : "Restoring a checkpoint did not hand back its gift watermark; gifts "
+                          + "delivered after it would be lost rather than re-offered.");
+                // A capture with no watermark must not leave the previous one
+                // behind - it belongs to a block that no longer exists.
+                Require(
+                    AzureDreamsTownCheckpoint.TryCapture(
+                        memory,
+                        identity,
+                        AzureDreamsCheckpointReason.TowerFloorEntry,
+                        out _,
+                        out checkpointMessage,
+                        shortcutDirectory),
+                    checkpointMessage);
+                handedBack = "not called";
+                Require(
+                    AzureDreamsTownCheckpoint.TryRestore(
+                        memory, identity, null, out _, out _, out checkpointMessage,
+                        shortcutDirectory, value => handedBack = value) &&
+                    handedBack is null,
+                    "A stale gift watermark outlived the checkpoint it was captured with.");
+            }
+            finally
+            {
+                try { Directory.Delete(shortcutDirectory, recursive: true); } catch { }
+                memory.TryWrite(
+                    AzureDreamsTownCheckpoint.LoadedModeAddress,
+                    [AzureDreamsTownCheckpoint.TownMode],
+                    out _);
+                memory.TryWrite(
+                    AzureDreamsTownCheckpoint.CurrentFloorAddress, new byte[2], out _);
             }
 
             byte[] validCheckpoint = File.ReadAllBytes(directMetadata.Path);
@@ -2884,8 +3409,10 @@ internal static class SelfTest
                     identity,
                     new AzureDreamsTownObservation(6, false),
                     saveIsPristine: true,
+                    null,
                     out bool restorePending,
                     out AzureDreamsCheckpointMetadata? restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage) &&
                 restorePending &&
@@ -2900,8 +3427,10 @@ internal static class SelfTest
                     identity,
                     restoreObservation,
                     saveIsPristine: true,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage),
                 checkpointMessage);
@@ -2918,8 +3447,10 @@ internal static class SelfTest
                     identity,
                     restoreObservation,
                     saveIsPristine: true,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage) &&
                 !restorePending &&
@@ -2943,8 +3474,10 @@ internal static class SelfTest
                     identity,
                     restoreObservation,
                     saveIsPristine: false,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out staleRestoreDropped,
                     out checkpointMessage),
                 memoryError ?? checkpointMessage);
@@ -2965,8 +3498,10 @@ internal static class SelfTest
                     identity,
                     restoreObservation,
                     saveIsPristine: false,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out staleRestoreDropped,
                     out checkpointMessage) &&
                 !restorePending &&
@@ -2985,8 +3520,10 @@ internal static class SelfTest
                     identity,
                     restoreObservation,
                     saveIsPristine: true,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage),
                 checkpointMessage);
@@ -3020,8 +3557,10 @@ internal static class SelfTest
                     identity,
                     attachInTowerObservation,
                     saveIsPristine: false,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage) &&
                 !restorePending &&
@@ -3045,8 +3584,10 @@ internal static class SelfTest
                     identity,
                     afterTowerAttachObservation,
                     saveIsPristine: true,
+                    null,
                     out restorePending,
                     out restoredCheckpoint,
+                    out _,
                     out _,
                     out checkpointMessage) &&
                 !restorePending &&
@@ -3727,22 +4268,51 @@ internal static class SelfTest
             ClientAssets.LockedCrystal is not null,
             "The locked-shortcut crystal tint could not be produced.");
 
-        // Slot bits run two per floor from floor 1, matching the tower location
-        // ids the APWorld generates.
+        // The journal is one byte per floor from floor 1, bit = slot (ADSV
+        // v4), three slots per floor.
         byte[] mask = new byte[AzureDreamsReceiveState.LocationMaskSize];
-        mask[0] = 0b0000_0010;   // floor 1 slot 2
-        mask[1] = 0b0000_0001;   // floor 5 slot 1
+        mask[0] = 0b0000_0010;   // floor 1 slot 1
+        mask[4] = 0b0000_0101;   // floor 5 slots 0 and 2 (the carrier's)
         var progress = new AzureDreamsTowerProgress(mask, 2, 7, 0);
         Require(
-            !progress.IsCollected(1, 0) && progress.IsCollected(1, 1),
+            !progress.IsCollected(1, 0) && progress.IsCollected(1, 1) && !progress.IsCollected(1, 2),
             "The tower view mapped floor 1's slots to the wrong mask bits.");
         Require(
-            progress.IsCollected(5, 0) && !progress.IsCollected(5, 1),
+            progress.IsCollected(5, 0) && !progress.IsCollected(5, 1) && progress.IsCollected(5, 2),
             "The tower view mapped floor 5's slots to the wrong mask bits.");
+        Require(
+            !progress.IsCollected(2, 0) && !progress.IsCollected(4, 0) && !progress.IsCollected(6, 0),
+            "A floor byte leaked into a neighbouring floor.");
+        Require(
+            AzureDreamsTowerProgress.SlotsPerFloor == 3 &&
+            !progress.IsCollected(1, AzureDreamsTowerProgress.SlotsPerFloor),
+            "The tower view accepted a slot past the per-floor count.");
         Require(
             !progress.IsCollected(0, 0) &&
             !progress.IsCollected(AzureDreamsTowerProgress.TopFloor, 0),
             "The tower view accepted a floor outside the item range.");
+
+        // A room with the carrier system off has two checks a floor. The
+        // journal keeps its three bits per floor - that is the save's layout,
+        // not the room's - so only what the VIEW draws changes, and the third
+        // column stays where it is rather than resizing the whole tower.
+        Require(
+            progress.CarrierChecks &&
+            progress.SlotsWithChecks == AzureDreamsTowerProgress.SlotsPerFloor,
+            "A room defaults to something other than three checks a floor.");
+        var withoutCarrier = progress with { CarrierChecks = false };
+        Require(
+            withoutCarrier.SlotsWithChecks == 2 &&
+            AzureDreamsTowerProgress.CarrierSlot == 2 &&
+            AzureDreamsReceiveState.SlotsPerFloor == 3,
+            "Switching the carrier off did not drop exactly the third slot.");
+        Require(
+            !progress.Equivalent(withoutCarrier),
+            "The carrier flag is outside the equivalence test, so the third column "
+            + "would keep its chests until something else in the record moved.");
+        Require(
+            withoutCarrier.IsCollected(5, 0) && !withoutCarrier.IsCollected(5, 1),
+            "Switching the carrier off changed how the journal is read.");
 
         // Reachability must match the formula the in-game HUD prints.
         Require(
@@ -3981,90 +4551,28 @@ internal static class SelfTest
                 new AzureDreamsItemDescriptor(2, 15, -1, 0xC0)) == 0x0AD7_7841,
             "A cursed gift's icon id drifted from the golden vector.");
 
-        // Build the real window off-screen and prove the tower fits inside it.
-        // The panels never scroll, so a layout that is a few pixels short would
-        // silently clip the bottom floor.
+        // Build the real connection screen off-screen. It is a SETUP screen
+        // now - the tower, the shops, the incoming queue and the activity feed
+        // all live in the tracker - so a panel left parented here would be one
+        // nothing feeds and nobody watches.
         using (var window = new ConnectionWindow())
         {
             window.CreateControl();
             window.PerformLayout();
-            TowerProgressPanel? panel = FindControl<TowerProgressPanel>(window);
-            IncomingItemsPanel? incoming = FindControl<IncomingItemsPanel>(window);
-            Require(panel is not null, "The window does not contain the tower panel.");
-            Require(incoming is not null, "The window does not contain the incoming panel.");
+            Require(
+                FindControl<TowerProgressPanel>(window) is null &&
+                FindControl<ShopProgressPanel>(window) is null &&
+                FindControl<IncomingItemsPanel>(window) is null &&
+                FindNamed(window, "ActivityFeed") is null,
+                "A tracker panel is still parented to the connection screen.");
 
-            // An unshown form has no meaningful screen origin, so accumulate
-            // the offset through the parent chain instead.
-            Rectangle towerScreen = OffsetWithin(panel!, window);
-            Require(
-                panel!.Width >= TowerProgressPanel.PreferredWidth &&
-                panel.Height >= TowerProgressPanel.PreferredHeight,
-                $"The tower panel laid out at {panel.Width}x{panel.Height}, smaller than its " +
-                $"{TowerProgressPanel.PreferredWidth}x{TowerProgressPanel.PreferredHeight} content.");
-            Require(
-                towerScreen.Left >= 0 && towerScreen.Top >= 0 &&
-                towerScreen.Bottom <= window.ClientSize.Height &&
-                towerScreen.Right <= window.ClientSize.Width,
-                $"The tower panel ends at {towerScreen.Right},{towerScreen.Bottom} outside the " +
-                $"{window.ClientSize.Width}x{window.ClientSize.Height} client area.");
-            Require(
-                !panel.AutoScroll && !panel.VerticalScroll.Visible,
-                "The tower panel is scrolling; it must always show all forty floors.");
-            // The Incoming heading must sit at the same height as the app
-            // title, so the two columns start level.
             Control? title = FindNamed(window, "AppTitle");
-            Control? incomingHeading = FindNamed(window, "IncomingHeading");
-            Require(
-                title is not null && incomingHeading is not null,
-                "The window is missing the title or the incoming heading.");
-            int titleTop = OffsetWithin(title!, window).Top;
-            int incomingTop = OffsetWithin(incomingHeading!, window).Top;
-            Require(
-                titleTop == incomingTop,
-                $"The incoming heading starts at y={incomingTop} but the title starts at " +
-                $"y={titleTop}; both columns must begin at the same height.");
-
-            // The incoming queue must sit directly over the tower, not spill
-            // across the shops column.
-            Rectangle incomingBounds = OffsetWithin(incoming!, window);
-            Require(
-                incomingBounds.Left == towerScreen.Left &&
-                incomingBounds.Right == towerScreen.Right,
-                $"The incoming queue spans x={incomingBounds.Left}-{incomingBounds.Right} but the " +
-                $"tower spans x={towerScreen.Left}-{towerScreen.Right}; they must line up.");
-
-            Control? keycard = FindNamed(window, "KeycardValue");
-            Require(keycard is not null, "The window does not contain the keycard readout.");
-            Rectangle keycardBounds = OffsetWithin(keycard!, window);
-            Require(
-                keycardBounds.Right <= incomingBounds.Left,
-                $"The keycard readout ends at x={keycardBounds.Right} but the incoming queue " +
-                $"starts at x={incomingBounds.Left}; the keycard belongs left of it.");
-
-            // Both counters ride the title's line, so both must be inside
-            // the header rather than clipped off the end of it - the failure
-            // the first render of this layout actually produced.
-            Control? sendTokens = FindNamed(window, "SendTokenValue");
-            Require(
-                sendTokens is not null,
-                "The window does not contain the send-token readout.");
-            Rectangle tokenBounds = OffsetWithin(sendTokens!, window);
-            Require(
-                tokenBounds.Left >= keycardBounds.Right,
-                $"The send-token readout starts at x={tokenBounds.Left}, left of the " +
-                $"keycard readout's end at x={keycardBounds.Right}; it belongs after it.");
-            Control? appTitle = FindNamed(window, "AppTitle");
-            Require(appTitle is not null, "The window does not contain the app title.");
-            Rectangle titleBounds = OffsetWithin(appTitle!, window);
-            Require(
-                tokenBounds.Top >= titleBounds.Top &&
-                tokenBounds.Bottom <= titleBounds.Bottom + 2,
-                $"The send-token readout at y={tokenBounds.Top}-{tokenBounds.Bottom} has left " +
-                $"the title's line at y={titleBounds.Top}-{titleBounds.Bottom}.");
+            Require(title is not null, "The window does not contain the app title.");
+            Rectangle titleBounds = OffsetWithin(title!, window);
             foreach ((string name, Control? control) in new[]
                      {
                          ("Create YAML", FindNamed(window, "CreateYamlButton")),
-                         ("Compact mode", FindNamed(window, "CompactModeButton")),
+                         ("Tracker", FindNamed(window, "TrackerButton")),
                      })
             {
                 Require(control is not null, $"The window has no {name} button.");
@@ -4074,196 +4582,83 @@ internal static class SelfTest
                     $"The {name} button ends at x={bounds.Right}, past the window's " +
                     $"{window.ClientSize.Width}px client width; the header must fit its own row.");
                 Require(
-                    bounds.Left >= tokenBounds.Right,
-                    $"The {name} button starts at x={bounds.Left}, overlapping the " +
-                    $"send-token readout that ends at x={tokenBounds.Right}.");
+                    bounds.Left >= titleBounds.Right,
+                    $"The {name} button starts at x={bounds.Left}, overlapping the title " +
+                    $"that ends at x={titleBounds.Right}.");
             }
 
-            ShopProgressPanel? shops = FindControl<ShopProgressPanel>(window);
-            Require(shops is not null, "The window does not contain the shop panel.");
-            Rectangle shopBounds = OffsetWithin(shops!, window);
-            Require(
-                shopBounds.Right <= towerScreen.Left,
-                $"The shops end at x={shopBounds.Right} but the tower starts at " +
-                $"x={towerScreen.Left}; the shops must sit left of the tower.");
-            Require(
-                shopBounds.Bottom <= window.ClientSize.Height,
-                "The shop panel is clipped by the bottom of the window.");
-
-            // The left column must take up the extra height the right column
-            // forces, rather than leaving dead space under the activity feed.
-            Control? activity = FindNamed(window, "ActivityFeed");
-            Require(activity is not null, "The window does not contain the activity feed.");
-            Rectangle activityBounds = OffsetWithin(activity!, window);
-            Require(
-                activityBounds.Bottom >= towerScreen.Bottom - ShellPaddingForTest,
-                $"The activity feed ends at y={activityBounds.Bottom} while the tower ends at " +
-                $"y={towerScreen.Bottom}; the left column is not absorbing the extra height.");
-
-            // The queue feed shares the activity row: to its right, same
-            // vertical extent, about a fifth of the pair's width.
-            Control? queueControl = FindNamed(window, "QueueFeed");
-            Require(queueControl is ListBox, "The window does not contain the queue feed.");
-            var queueFeed = (ListBox)queueControl!;
-            Rectangle queueBounds = OffsetWithin(queueFeed, window);
-            Require(
-                queueBounds.Left >= activityBounds.Right,
-                $"The queue feed starts at x={queueBounds.Left}, left of the activity feed's " +
-                $"right edge x={activityBounds.Right}.");
-            Require(
-                queueBounds.Top == activityBounds.Top &&
-                queueBounds.Bottom == activityBounds.Bottom,
-                $"The queue feed spans y={queueBounds.Top}-{queueBounds.Bottom} but the activity " +
-                $"feed spans y={activityBounds.Top}-{activityBounds.Bottom}; they must match.");
-            int feedPairWidth = queueBounds.Right - activityBounds.Left;
-            Require(
-                Math.Abs(queueBounds.Width - feedPairWidth / 5) <= 12,
-                $"The queue feed is {queueBounds.Width}px of the {feedPairWidth}px feed row; " +
-                "expected about a fifth.");
-
-            // The queue feed mirrors the incoming boxes: names only, the
-            // head first, and a delivery shifts everything up one.
-            // CreateControl is a no-op for an unshown form, so force the
-            // handle UpdateIncoming's re-entrancy guard checks for.
-            _ = window.Handle;
-            var queuedItems = new List<AzureDreamsIncomingItem>
+            // Every field row must line up: same centre.
+            foreach (string[] group in new[]
             {
-                new(0x0AD2_0101, "Pita Fruit", "Sandknight"),
-                new(0x0AD2_0102, "Medicinal Herb", "Wugga"),
-                new(0x0AD2_0103, "Iron Sword", "Septic"),
-            };
-            window.UpdateIncoming(queuedItems);
-            Require(
-                queueFeed.Items.Count == 3 &&
-                (string)queueFeed.Items[0] == "Pita Fruit" &&
-                (string)queueFeed.Items[1] == "Medicinal Herb" &&
-                (string)queueFeed.Items[2] == "Iron Sword",
-                "The queue feed does not list pending item names head-first.");
-            window.UpdateIncoming(queuedItems.Skip(1).ToArray());
-            Require(
-                queueFeed.Items.Count == 2 &&
-                (string)queueFeed.Items[0] == "Medicinal Herb" &&
-                (string)queueFeed.Items[1] == "Iron Sword",
-                "A delivery did not shift the queue feed up by one.");
-            window.UpdateIncoming([]);
-            Require(
-                queueFeed.Items.Count == 0,
-                "An emptied delivery queue left stale lines in the queue feed.");
-
-            // Activity wording: room-wide sends appear, a self-send reads
-            // as a find, and receives do not print at all.
-            var activityFeed = (RichTextBox)activity!;
-            activityFeed.Clear();
-            window.AppendTransfer(new ClientTransfer(
-                ClientTransferKind.Sent, "Pita Fruit", "Sandknight", "Wugga", false, false));
-            window.AppendTransfer(new ClientTransfer(
-                ClientTransferKind.Sent, "Fire Ball", "Septic", "Septic", true, true));
-            window.AppendTransfer(new ClientTransfer(
-                ClientTransferKind.Received, "Cure-All Herb", "Wugga", "Septic", false, true));
-            string feedText = activityFeed.Text;
-            Require(
-                feedText.Contains("Sandknight sent Pita Fruit to Wugga.", StringComparison.Ordinal),
-                "A remote-to-remote send did not reach the activity feed.");
-            Require(
-                feedText.Contains("Septic found Fire Ball.", StringComparison.Ordinal),
-                "A self-send did not print as a find.");
-            Require(
-                !feedText.Contains("Septic sent Fire Ball to Septic", StringComparison.Ordinal),
-                "A self-send still printed in sent-to form.");
-            Require(
-                !feedText.Contains("Cure-All Herb", StringComparison.Ordinal),
-                "A receive printed in the activity feed.");
-            activityFeed.Clear();
-
-            int rightMargin = window.ClientSize.Width - towerScreen.Right;
-            int bottomMargin = window.ClientSize.Height - towerScreen.Bottom;
-            Require(
-                rightMargin >= 12 && bottomMargin >= 12,
-                $"The tower sits {rightMargin}px from the right edge and {bottomMargin}px " +
-                "from the bottom; the window needs a visible margin on both.");
-            // Measure the gaps the eye reads as margins, so they can be made
-            // equal rather than guessed at.
-            Control? root = FindNamed(window, "LeftColumn");
-            if (root is not null)
+                new[] { "PatchPath", "PatchButton" },
+                new[] { "OriginalRomPath", "OriginalRomButton" },
+                new[] { "EmulatorPath", "EmulatorButton" },
+                new[] { "ServerBox", "PortBox", "SaveServerButton" },
+            })
             {
-                Rectangle left = OffsetWithin(root, window);
-                Console.WriteLine(
-                    $"  Gaps: left column right edge={left.Right}, " +
-                    $"keycard/incoming column left={OffsetWithin(incoming!, window).Left}, " +
-                    $"shops top={shopBounds.Top}, tower top={towerScreen.Top}, " +
-                    $"incoming bottom={OffsetWithin(incoming!, window).Bottom}, " +
-                    $"window right margin={window.ClientSize.Width - towerScreen.Right}, " +
-                    $"window bottom margin={window.ClientSize.Height - towerScreen.Bottom}");
-                Control? th = FindNamed(window, "TowerHeading");
-                if (th is not null)
+                var found = group
+                    .Select(n => FindNamed(window, n))
+                    .Where(c => c is not null)
+                    .Select(c => c!)
+                    .ToArray();
+                Require(
+                    found.Length == group.Length,
+                    $"The connection screen is missing one of {string.Join(", ", group)}.");
+                string report = string.Join(
+                    ", ",
+                    found.Select(c => $"{c.Name} y={OffsetWithin(c, window).Top} h={c.Height}"));
+                Console.WriteLine($"  Row: {report}");
+                // Centres, not tops: a DropDown combo is font-locked to a
+                // shorter height than the boxes beside it, so centring is
+                // the alignment that can actually be achieved.
+                Rectangle first = OffsetWithin(found[0], window);
+                int centre = first.Top + first.Height / 2;
+                foreach (Control c in found)
                 {
-                    int rowGap = OffsetWithin(th, window).Top -
-                        OffsetWithin(incoming!, window).Bottom;
-                    // The seam is measured from the left column's content edge,
-                    // which is its right edge less whatever padding the layout
-                    // pass settled on.
-                    int columnGap =
-                        shopBounds.Left - (left.Right - ((TableLayoutPanel)root).Padding.Right);
-                    Console.WriteLine(
-                        $"  Seams: rowGap={rowGap}, columnGap={columnGap}, " +
-                        $"leftPadRight={((TableLayoutPanel)root).Padding.Right}, " +
-                        $"leftRight={left.Right}, shopsLeft={shopBounds.Left}");
+                    Rectangle bounds = OffsetWithin(c, window);
                     Require(
-                        rowGap == 16 && columnGap == 16,
-                        $"Seams are uneven: row gap {rowGap}, column gap {columnGap}; " +
-                        "both must match the 16px window margin.");
-                }
-                // Every field row must line up: same top, same height.
-                foreach (string[] group in new[]
-                {
-                    new[] { "PatchPath", "PatchButton" },
-                    new[] { "OriginalRomPath", "OriginalRomButton" },
-                    new[] { "EmulatorPath", "EmulatorButton" },
-                    new[] { "ServerBox", "PortBox", "SaveServerButton" },
-                })
-                {
-                    var found = group
-                        .Select(n => FindNamed(window, n))
-                        .Where(c => c is not null)
-                        .Select(c => c!)
-                        .ToArray();
-                    if (found.Length != group.Length)
-                        continue;
-                    string report = string.Join(
-                        ", ",
-                        found.Select(c => $"{c.Name} y={OffsetWithin(c, window).Top} h={c.Height}"));
-                    Console.WriteLine($"  Row: {report}");
-                    // Centres, not tops: a DropDown combo is font-locked to a
-                    // shorter height than the boxes beside it, so centring is
-                    // the alignment that can actually be achieved.
-                    Rectangle first = OffsetWithin(found[0], window);
-                    int centre = first.Top + first.Height / 2;
-                    foreach (Control c in found)
-                    {
-                        Rectangle bounds = OffsetWithin(c, window);
-                        Require(
-                            Math.Abs(bounds.Top + bounds.Height / 2 - centre) <= 1,
-                            $"Field row misaligned: {report}");
-                    }
-                }
-
-                Control? kc = FindNamed(window, "KeycardValue");
-                Control? st = FindNamed(window, "SendTokenValue");
-                Control? inc = FindNamed(window, "IncomingHeading");
-                if (kc is not null && st is not null && inc is not null)
-                {
-                    Console.WriteLine(
-                        $"  Header: keycardValue={OffsetWithin(kc, window)}, " +
-                        $"sendTokenValue={OffsetWithin(st, window)}, " +
-                        $"counters={OffsetWithin(kc.Parent!, window)}, " +
-                        $"incomingHeading={OffsetWithin(inc, window)}, " +
-                        $"incomingColumn={OffsetWithin(incoming!.Parent!, window)}");
+                        Math.Abs(bounds.Top + bounds.Height / 2 - centre) <= 1,
+                        $"Field row misaligned: {report}");
                 }
             }
+
+            // The window is sized to its own content, and the progress bar
+            // that appears mid-patch is part of that content even while it is
+            // hidden - a window measured without it would clip the Game panel
+            // the moment a build started.
+            Control? gameSection = FindNamed(window, "GameSection");
+            Require(gameSection is not null, "The window does not contain the Game section.");
+            Rectangle gameBounds = OffsetWithin(gameSection!, window);
+            Require(
+                gameBounds.Bottom <= window.ClientSize.Height,
+                $"The Game section ends at y={gameBounds.Bottom} inside a " +
+                $"{window.ClientSize.Height}px client area; it is clipped.");
+            // The bottom margin is the side margin. It used to be three times
+            // it, because a row was reserved for a progress bar that is
+            // visible only during a build.
+            int bottomMargin = window.ClientSize.Height - gameBounds.Bottom;
+            Require(
+                bottomMargin == ShellPaddingForTest,
+                $"The window leaves {bottomMargin}px under the Game section " +
+                $"against a {ShellPaddingForTest}px margin everywhere else.");
+            // That bar now floats in the margin, positioned by hand - so it is
+            // the one control here that can be laid out off the window.
+            ProgressBar? patchBar = FindControl<ProgressBar>(window);
+            Require(patchBar is not null, "The window has no patch progress bar.");
+            Rectangle bar = OffsetWithin(patchBar!, window);
+            Require(
+                bar.Top >= gameBounds.Bottom && bar.Bottom <= window.ClientSize.Height &&
+                bar.Left >= 0 && bar.Right <= window.ClientSize.Width && bar.Width > 0,
+                $"The patch progress bar sits at {bar} against a " +
+                $"{window.ClientSize.Width}x{window.ClientSize.Height} client area with the " +
+                $"Game section ending at y={gameBounds.Bottom}; it belongs in the margin " +
+                "under it.");
+            Require(
+                !patchBar!.Visible,
+                "The patch progress bar is showing with no patch in flight.");
             Console.WriteLine(
-                $"  Layout: window {window.Size.Width}x{window.Size.Height}, " +
-                $"tower {panel.Width}x{panel.Height} at {towerScreen.X},{towerScreen.Y}, " +
-                $"incoming {incoming!.Width}x{incoming.Height}.");
+                $"  Connection screen: window {window.Size.Width}x{window.Size.Height}, " +
+                $"Game section bottom={gameBounds.Bottom}.");
         }
 
         Require(
@@ -4281,145 +4676,211 @@ internal static class SelfTest
     /// dropped one, clipped the tower, or forgot to put a panel back would
     /// still run - it would just quietly stop showing the session.
     /// </summary>
-    private static void TestCompactMode()
+    /// <summary>
+    /// The feed carries every room-wide send, so in a full multiworld it is
+    /// the one control that grows without limit for as long as the session
+    /// lasts - and a RichTextBox charges for its whole document on every
+    /// append. Prove the bound holds and that it drops the oldest lines
+    /// rather than the newest.
+    /// </summary>
+    private static void TestActivityFeedIsBounded()
+    {
+        using var window = new ConnectionWindow();
+        window.CreateControl();
+        // The feed moved to the tracker, and the tracker is fed whether it is
+        // on screen or not - which is exactly the case this bound has to hold
+        // in, since a player may never open it at all.
+        TrackerWindow tracker = window.Tracker;
+        tracker.CreateControl();
+        var feed = (RichTextBox)FindNamed(tracker, "ActivityFeed")!;
+        _ = feed.Handle;
+
+        Color feedBackground = feed.BackColor;
+        const int overflow = 120;
+        for (int line = 0; line < ConnectionWindow.ActivityLineLimit + overflow; line++)
+        {
+            window.AppendTransfer(new ClientTransfer(
+                ClientTransferKind.Sent,
+                $"Item {line}",
+                "Sandknight",
+                "Wugga",
+                false,
+                false));
+        }
+
+        // Lines counts the document's own paragraphs; a trailing newline adds
+        // one empty last entry, hence the slack.
+        int lines = feed.Lines.Length;
+        Require(
+            lines <= ConnectionWindow.ActivityLineLimit + 1,
+            $"The activity feed grew to {lines} lines, past its {ConnectionWindow.ActivityLineLimit} limit.");
+        Require(
+            lines >= ConnectionWindow.ActivityLinesKept,
+            $"Trimming the activity feed left only {lines} lines of scrollback.");
+        Require(
+            feed.Text.Contains(
+                $"Item {ConnectionWindow.ActivityLineLimit + overflow - 1}",
+                StringComparison.Ordinal),
+            "Trimming the activity feed dropped the newest line.");
+        Require(
+            !feed.Text.Contains("Item 0 ", StringComparison.Ordinal),
+            "Trimming the activity feed kept the oldest line.");
+        // The trim lifts ReadOnly to delete. A text box repaints itself when
+        // that flag moves, so prove the feed came back the colour it was.
+        Require(
+            feed.ReadOnly && feed.BackColor == feedBackground,
+            "Trimming the activity feed left it editable or recoloured.");
+    }
+
+    /// <summary>
+    /// The tracker, asserted against the real window. Three separate failures
+    /// are silent without this: a panel that never made it across, a window
+    /// whose scale solver disagrees with the size it opens at, and - the new
+    /// one - a tracker painting its default colours as though they were
+    /// readings of a live game.
+    /// </summary>
+    private static void TestTrackerWindow()
     {
         using var window = new ConnectionWindow();
         window.CreateControl();
         window.PerformLayout();
         _ = window.Handle;
 
-        Size fullSize = window.Size;
-        Require(!window.IsCompactMode, "The window did not start in full mode.");
-
-        // The queue that compact mode folds into the incoming panel; staged
-        // before the switch so the move has live state to carry across.
-        var queued = new List<AzureDreamsIncomingItem>
-        {
-            new(0x0AD2_0101, "Pita Fruit", "Sandknight"),
-            new(0x0AD2_0102, "Medicinal Herb", "Wugga"),
-        };
-        window.UpdateIncoming(queued);
-
-        // Moving a RichTextBox between parents destroys and recreates its
-        // handle. WinForms is supposed to carry the RTF across; a session's
-        // whole scrollback is riding on it, so prove it rather than trust it.
-        // The handle has to be forced first - an unshown form never creates
-        // one, and then the move would not exercise the path at all.
-        var feed = (RichTextBox)FindNamed(window, "ActivityFeed")!;
-        _ = feed.Handle;
-        window.AppendTransfer(new ClientTransfer(
-            ClientTransferKind.Sent, "Pita Fruit", "Sandknight", "Wugga", false, false));
-        string stagedFeed = feed.Text;
+        TrackerWindow tracker = window.Tracker;
+        tracker.CreateControl();
+        tracker.PerformLayout();
+        _ = tracker.Handle;
         Require(
-            stagedFeed.Contains("Sandknight sent Pita Fruit to Wugga.", StringComparison.Ordinal),
-            "The activity feed did not accept the line staged before the mode switch.");
+            !window.IsTrackerOpen,
+            "The tracker was already on screen before anything asked for it.");
 
-        window.SetCompactMode(true);
-        window.PerformLayout();
-        Require(window.IsCompactMode, "The window did not enter compact mode.");
-        Require(
-            window.Size.Width < fullSize.Width,
-            $"Compact mode is {window.Size.Width}px wide against the full window's " +
-            $"{fullSize.Width}px; it has to actually save space.");
-        Size compactSize = window.Size;
-
-        // The connection and game controls are the point of the mode: gone,
-        // along with the shell that held them.
+        // The setup controls stayed behind. The split is the point of the
+        // window: one screen is touched once, the other is watched for hours.
         foreach (string name in new[]
         {
             "ServerBox", "PortBox", "SaveServerButton", "PatchPath", "PatchButton",
-            "OriginalRomPath", "EmulatorPath", "EmulatorButton",
+            "OriginalRomPath", "EmulatorPath", "EmulatorButton", "CreateYamlButton",
+            "TrackerButton",
         })
         {
-            Control? field = FindNamed(window, name);
             Require(
-                field is null || !IsInActiveShell(field, window),
-                $"Compact mode still shows the {name} control.");
+                FindNamed(tracker, name) is null,
+                $"The tracker carries the {name} control, which belongs to the setup screen.");
         }
 
-        // Both live states survive, because those are what a running session
-        // is actually watched for.
-        Control? room = FindNamed(window, "CompactRoomStatus");
-        Control? game = FindNamed(window, "CompactGameStatus");
-        Control? keycards = FindNamed(window, "CompactKeycardValue");
-        Control? sendTokens = FindNamed(window, "CompactSendTokenValue");
-        Require(
-            room is not null && game is not null && keycards is not null &&
-            sendTokens is not null,
-            "Compact mode is missing the room, game, keycard or send-token readout.");
-        Require(
-            IsInActiveShell(room!, window) &&
-            IsInActiveShell(game!, window) &&
-            IsInActiveShell(keycards!, window) &&
-            IsInActiveShell(sendTokens!, window),
-            "Compact mode built the status readouts but does not show them.");
-        // Both counters carry the same numbers in both layouts: the readout
-        // is set through one call that writes all four labels, so a
-        // divergence here means a mode switch stopped following the state.
-        Control? fullKeycards = FindNamed(window, "KeycardValue");
-        Control? fullTokens = FindNamed(window, "SendTokenValue");
-        Require(
-            fullKeycards is not null && fullTokens is not null &&
-            fullKeycards!.Text == keycards!.Text &&
-            fullTokens!.Text == sendTokens!.Text,
-            "The compact and full readouts disagree " +
-            $"(keycards \"{keycards?.Text}\" vs \"{fullKeycards?.Text}\", " +
-            $"tokens \"{sendTokens?.Text}\" vs \"{fullTokens?.Text}\").");
-        Require(
-            room!.Text == "Not connected" && game!.Text == "Game not running.",
-            $"The compact readouts do not carry the live status text " +
-            $"(room \"{room!.Text}\", game \"{game!.Text}\").");
-
-        IncomingItemsPanel? incoming = FindControl<IncomingItemsPanel>(window);
-        TowerProgressPanel? tower = FindControl<TowerProgressPanel>(window);
-        ShopProgressPanel? shops = FindControl<ShopProgressPanel>(window);
-        Control? activity = FindNamed(window, "ActivityFeed");
+        IncomingItemsPanel? incoming = FindControl<IncomingItemsPanel>(tracker);
+        TowerProgressPanel? tower = FindControl<TowerProgressPanel>(tracker);
+        ShopProgressPanel? shops = FindControl<ShopProgressPanel>(tracker);
+        Control? activity = FindNamed(tracker, "ActivityFeed");
         Require(
             incoming is not null && tower is not null && shops is not null &&
             activity is not null,
-            "A panel was lost on the way into compact mode.");
-        Require(
-            IsInActiveShell(incoming!, window) &&
-            IsInActiveShell(tower!, window) &&
-            IsInActiveShell(shops!, window) &&
-            IsInActiveShell(activity!, window),
-            "A panel moved into compact mode but is not being shown.");
+            "The tracker is missing one of its four panels.");
         Require(
             incoming!.LayoutMode == IncomingItemsLayout.VerticalNamed,
-            "The compact incoming queue is still drawing its horizontal row.");
-        Require(
-            feed.Text == stagedFeed,
-            "The activity feed lost its scrollback on the way into compact mode.");
-        // The default compact window is the unscaled one. Anything else means
-        // the size it opens at disagrees with the size its own scale solver
-        // thinks that layout needs.
-        Require(
-            incoming.Scale == UiScale.Natural &&
-            tower!.Scale == UiScale.Natural &&
-            shops!.Scale == UiScale.Natural,
-            $"Compact mode opened scaled (incoming {incoming.Scale:0.###}, tower " +
-            $"{tower!.Scale:0.###}, shops {shops!.Scale:0.###}); its default size must " +
-            "be exactly what the natural layout needs.");
-        Require(
-            incoming.Height >= incoming.ScaledHeight &&
-            incoming.Width >= incoming.ScaledWidth,
-            $"The vertical incoming queue laid out at {incoming.Width}x{incoming.Height}, " +
-            $"smaller than its {incoming.ScaledWidth}x{incoming.ScaledHeight} content.");
-        // The gap this closed: ten rows that stopped short of the shops beside
-        // them left an obvious dead strip under the queue.
-        Require(
-            IncomingItemsPanel.VerticalPreferredHeight ==
-                ShopProgressPanel.PreferredHeight,
-            $"The vertical incoming queue is {IncomingItemsPanel.VerticalPreferredHeight}px " +
-            $"against the shops' {ShopProgressPanel.PreferredHeight}px; the two sit side by " +
-            "side and must be the same height.");
+            "The tracker incoming queue is drawing the horizontal icon row.");
 
-        Rectangle incomingBounds = OffsetWithin(incoming, window);
-        Rectangle shopBounds = OffsetWithin(shops!, window);
-        Rectangle towerBounds = OffsetWithin(tower!, window);
-        Rectangle activityBounds = OffsetWithin(activity!, window);
+        // The strip is what the SESSION is worth: the two connection states
+        // went back to the setup screen, which is the only window that can act
+        // on either, and the three sands took the room they freed.
+        Require(
+            FindNamed(tracker, "TrackerRoomStatus") is null &&
+            FindNamed(tracker, "TrackerGameStatus") is null,
+            "The tracker still duplicates the connection screen's status lines.");
+        Control? keycards = FindNamed(tracker, "TrackerKeycardValue");
+        Control? sendTokens = FindNamed(tracker, "TrackerSendTokenValue");
+        Control? redSand = FindNamed(tracker, "TrackerRedSandValue");
+        Control? blueSand = FindNamed(tracker, "TrackerBlueSandValue");
+        Control? whiteSand = FindNamed(tracker, "TrackerWhiteSandValue");
+        Require(
+            keycards is not null && sendTokens is not null && redSand is not null &&
+            blueSand is not null && whiteSand is not null,
+            "The tracker is missing the keycard, send-token or sand readouts.");
+        Require(
+            redSand!.Text == "-" && blueSand!.Text == "-" && whiteSand!.Text == "-",
+            "The sand readouts claim a level before any save has been read.");
+        // Three sands, three sprites, three DIFFERENT sprites: the colour is
+        // the only thing telling them apart, so a failed tint would leave two
+        // of them identical and the strip unreadable.
+        Require(
+            ClientAssets.RedSand is not null && ClientAssets.BlueSand is not null &&
+            ClientAssets.WhiteSand is not null,
+            "A sand sprite is missing: sand.png or one of its tints failed to load.");
+        foreach (string name in new[]
+        {
+            "TrackerRedSandIcon", "TrackerBlueSandIcon", "TrackerWhiteSandIcon",
+        })
+        {
+            Control? icon = FindNamed(tracker, name);
+            Require(
+                icon is PictureBox box && box.Image is not null,
+                $"The tracker's {name} has no sprite in it.");
+        }
 
-        // The arrangement the mode exists for: incoming above the activity
+        // Drained until all three of room, game and progression are in hand.
+        // Every colour in here means something specific - a red crystal is a
+        // locked shortcut, a red shop is a shut shop - and before the game has
+        // answered, those are DEFAULTS wearing the same paint.
+        Require(
+            !tracker.IsLive && !tower!.Live && !shops!.Live,
+            "The tracker opened in colour, before it had a room, a game or a " +
+            "progression snapshot to colour anything from.");
+        window.HandleClientOutput("Archipelago login succeeded for Septic.");
+        Require(
+            !tracker.IsLive,
+            "A room alone turned the tracker colours on; the game had said nothing yet.");
+        window.HandleClientOutput("Connected to DuckStation (PID 1234).");
+        Require(
+            !tracker.IsLive,
+            "An attached game alone turned the colours on; no progression had been read.");
+        byte[] liveMask = new byte[AzureDreamsReceiveState.LocationMaskSize];
+        window.UpdateTower(new AzureDreamsTowerProgress(
+            liveMask,
+            3,
+            7,
+            0b0100_0001u,
+            IsInTower: true,
+            SendTokens: 2,
+            WeaponTemperLevel: 2,
+            ShieldTemperLevel: 1,
+            BallChargeLevel: 3));
+        Require(
+            tracker.IsLive && tower!.Live && shops!.Live,
+            "Room, game and a progression snapshot were all in and the tracker " +
+            "stayed drained.");
+        Require(
+            keycards!.Text == "3/8" && sendTokens!.Text == "2",
+            $"The tracker counters read \"{keycards!.Text}\" and \"{sendTokens!.Text}\" " +
+            "against a snapshot of 3 keycards and 2 send tokens.");
+        Require(
+            redSand.Text == "2/3" && blueSand.Text == "1/3" && whiteSand.Text == "3/3",
+            $"The sand readouts read \"{redSand.Text}\", \"{blueSand.Text}\" and " +
+            $"\"{whiteSand.Text}\" against a save at weapon 2, shield 1, ball 3.");
+        // A sand's level is a fact about the SAVE, and nothing else in the
+        // record moves when one lands - so a comparison that ignored them
+        // would freeze the readout until something unrelated changed.
+        var beforeSand = new AzureDreamsTowerProgress(liveMask, 3, 7, 0u);
+        Require(
+            !beforeSand.Equivalent(beforeSand with { WeaponTemperLevel = 1 }) &&
+            !beforeSand.Equivalent(beforeSand with { ShieldTemperLevel = 1 }) &&
+            !beforeSand.Equivalent(beforeSand with { BallChargeLevel = 1 }),
+            "A sand level changed and the progress record read as unchanged; " +
+            "the readout would never be repainted.");
+        // Losing the game link is losing the readings, not just the link.
+        window.HandleClientOutput("Game connection waiting for DuckStation.");
+        Require(
+            !tracker.IsLive && !tower.Live,
+            "The game link dropped and the tracker kept painting its last state " +
+            "as though it were current.");
+        window.HandleClientOutput("Reconnected to DuckStation (PID 1234).");
+        Require(tracker.IsLive, "Reattaching to the game did not restore the colours.");
+
+        Rectangle incomingBounds = OffsetWithin(incoming, tracker);
+        Rectangle shopBounds = OffsetWithin(shops!, tracker);
+        Rectangle towerBounds = OffsetWithin(tower!, tracker);
+        Rectangle activityBounds = OffsetWithin(activity!, tracker);
+
+        // The arrangement the window exists for: incoming above the activity
         // feed, shops beside it, and the feed reaching back under the shops.
         Require(
             incomingBounds.Bottom <= activityBounds.Top,
@@ -4428,7 +4889,7 @@ internal static class SelfTest
         Require(
             incomingBounds.Right <= shopBounds.Left &&
             shopBounds.Right <= towerBounds.Left,
-            $"Compact columns are out of order: incoming ends x={incomingBounds.Right}, " +
+            $"Tracker columns are out of order: incoming ends x={incomingBounds.Right}, " +
             $"shops x={shopBounds.Left}-{shopBounds.Right}, tower starts x={towerBounds.Left}.");
         Require(
             activityBounds.Right > shopBounds.Left &&
@@ -4438,171 +4899,141 @@ internal static class SelfTest
             $"y={shopBounds.Bottom}.");
         Require(
             activityBounds.Right <= towerBounds.Left,
-            $"The activity feed ends at x={activityBounds.Right}, past the tower's left edge " +
+            $"The activity feed ends at x={activityBounds.Right}, past the tower left edge " +
             $"x={towerBounds.Left}.");
 
-        // Nothing scrolls in either mode, so a short window clips silently.
+        // Nothing scrolls, so a short window clips silently.
         Require(
-            towerBounds.Bottom <= window.ClientSize.Height &&
-            towerBounds.Right <= window.ClientSize.Width &&
-            activityBounds.Bottom <= window.ClientSize.Height,
-            $"Compact mode clips its content: tower ends {towerBounds.Right},"
+            towerBounds.Bottom <= tracker.ClientSize.Height &&
+            towerBounds.Right <= tracker.ClientSize.Width &&
+            activityBounds.Bottom <= tracker.ClientSize.Height,
+            $"The tracker clips its content: tower ends {towerBounds.Right},"
             + $"{towerBounds.Bottom} and the feed ends y={activityBounds.Bottom} inside a "
-            + $"{window.ClientSize.Width}x{window.ClientSize.Height} client area.");
+            + $"{tracker.ClientSize.Width}x{tracker.ClientSize.Height} client area.");
         Require(
             tower.Height >= tower.ScaledHeight && shops.Height >= shops.ScaledHeight,
-            $"Compact mode squeezed the tower to {tower.Height}px or the shops to " +
+            $"The tracker squeezed the tower to {tower.Height}px or the shops to " +
             $"{shops.Height}px, below their {tower.ScaledHeight}/" +
             $"{shops.ScaledHeight}px content.");
+        // The default tracker is the unscaled one. Anything else means the
+        // size it opens at disagrees with the size its own scale solver thinks
+        // that layout needs.
+        Require(
+            incoming.Scale == UiScale.Natural &&
+            tower.Scale == UiScale.Natural &&
+            shops.Scale == UiScale.Natural,
+            $"The tracker opened scaled (incoming {incoming.Scale:0.###}, tower " +
+            $"{tower.Scale:0.###}, shops {shops.Scale:0.###}); its default size must " +
+            "be exactly what the natural layout needs.");
+        // The gap this closed: ten rows that stopped short of the shops beside
+        // them left an obvious dead strip under the queue.
+        Require(
+            IncomingItemsPanel.VerticalPreferredHeight ==
+                ShopProgressPanel.PreferredHeight,
+            $"The vertical incoming queue is {IncomingItemsPanel.VerticalPreferredHeight}px " +
+            $"against the shops' {ShopProgressPanel.PreferredHeight}px; the two sit side by " +
+            "side and must be the same height.");
         Console.WriteLine(
-            $"  Compact: window {window.Size.Width}x{window.Size.Height} " +
-            $"(full {fullSize.Width}x{fullSize.Height}), incoming " +
+            $"  Tracker: window {tracker.Size.Width}x{tracker.Size.Height}, incoming " +
             $"{incomingBounds.Width}x{incomingBounds.Height}, feed " +
             $"{activityBounds.Width}x{activityBounds.Height}.");
 
-        // Compact mode has to be shrinkable, and everything drawn in it has to
+        // The tracker has to be shrinkable, and everything drawn in it has to
         // come down together. The tower is the binding constraint - forty
         // floors is what makes the window tall - so proving it scales is
         // proving the window can actually get smaller.
+        Size openedAt = tracker.Size;
         Require(
-            window.MinimumSize.Width < compactSize.Width &&
-            window.MinimumSize.Height < compactSize.Height,
-            $"Compact mode pinned its minimum at {window.MinimumSize.Width}x" +
-            $"{window.MinimumSize.Height}, so the {compactSize.Width}x{compactSize.Height} " +
+            tracker.MinimumSize.Width < openedAt.Width &&
+            tracker.MinimumSize.Height < openedAt.Height,
+            $"The tracker pinned its minimum at {tracker.MinimumSize.Width}x" +
+            $"{tracker.MinimumSize.Height}, so the {openedAt.Width}x{openedAt.Height} " +
             "default cannot be shrunk at all.");
-        Size shrunk = window.MinimumSize;
-        window.Size = shrunk;
-        window.PerformLayout();
+        Size shrunk = tracker.MinimumSize;
+        tracker.Size = shrunk;
+        tracker.PerformLayout();
         Require(
-            window.Size == shrunk,
-            $"The window refused to shrink to its own minimum {shrunk.Width}x{shrunk.Height}.");
+            tracker.Size == shrunk,
+            $"The tracker refused to shrink to its own minimum {shrunk.Width}x{shrunk.Height}.");
         double small = tower.Scale;
         Require(
             small < UiScale.Natural && small >= UiScale.Minimum,
-            $"Shrinking the window left the tower at scale {small:0.###}; it should have " +
+            $"Shrinking the tracker left the tower at scale {small:0.###}; it should have " +
             $"solved between {UiScale.Minimum} and {UiScale.Natural}.");
         Require(
             Math.Abs(shops.Scale - small) < 0.001 &&
             Math.Abs(incoming.Scale - small) < 0.001,
             $"The panels scaled apart (tower {small:0.###}, shops {shops.Scale:0.###}, " +
-            "incoming {incoming.Scale:0.###}); they have to move together.");
-        Rectangle shrunkTower = OffsetWithin(tower, window);
+            $"incoming {incoming.Scale:0.###}); they have to move together.");
+        Rectangle shrunkTower = OffsetWithin(tower, tracker);
         Require(
             tower.Height < TowerProgressPanel.PreferredHeight &&
             shops.Height < ShopProgressPanel.PreferredHeight,
-            $"The window shrank but the tower stayed {tower.Height}px and the shops " +
+            $"The tracker shrank but the tower stayed {tower.Height}px and the shops " +
             $"{shops.Height}px; the panels have to come down with it.");
         Require(
-            shrunkTower.Bottom <= window.ClientSize.Height &&
-            shrunkTower.Right <= window.ClientSize.Width,
+            shrunkTower.Bottom <= tracker.ClientSize.Height &&
+            shrunkTower.Right <= tracker.ClientSize.Width,
             $"At minimum size the tower ends at {shrunkTower.Right},{shrunkTower.Bottom} " +
-            $"outside the {window.ClientSize.Width}x{window.ClientSize.Height} client area.");
+            $"outside the {tracker.ClientSize.Width}x{tracker.ClientSize.Height} client area.");
 
         // The status strip does not scale with the rest, so the minimum width
         // has to clear the strip's own line as well as the shrunken panels.
         // Before it did, the send-token readout was simply cut off the right
-        // edge at the smallest compact size - silently, because nothing here
-        // scrolls or wraps.
-        Control? strip = FindNamed(window, "CompactStatusStrip");
-        Require(strip is not null, "Compact mode does not contain its status strip.");
-        Control? compactTokens = FindNamed(window, "CompactSendTokenValue");
-        Control? compactToggle = FindNamed(window, "FullModeButton");
-        Require(
-            compactTokens is not null,
-            "Compact mode does not contain the send-token readout.");
+        // edge at the smallest size - silently, because nothing here scrolls
+        // or wraps.
+        Control? strip = FindNamed(tracker, "TrackerStatusStrip");
+        Require(strip is not null, "The tracker does not contain its status strip.");
         Require(
             strip!.PreferredSize.Width <= strip.Width,
             $"At minimum size the status strip needs {strip.PreferredSize.Width}px but was " +
             $"given {strip.Width}px, so its right-hand items are clipped.");
-        Rectangle compactTokenBounds = OffsetWithin(compactTokens!, window);
+        Rectangle tokenBounds = OffsetWithin(sendTokens!, tracker);
         Require(
-            compactTokenBounds.Right <= window.ClientSize.Width,
-            $"At minimum size the send-token readout ends at x={compactTokenBounds.Right}, " +
-            $"outside the {window.ClientSize.Width}px client area.");
-        Require(compactToggle is not null, "Compact mode does not contain the mode button.");
-        Rectangle toggleBounds = OffsetWithin(compactToggle!, window);
-        Require(
-            toggleBounds.Right <= window.ClientSize.Width &&
-            toggleBounds.Left >= compactTokenBounds.Right,
-            $"At minimum size the mode button sits at {toggleBounds.Left}-" +
-            $"{toggleBounds.Right} against a {window.ClientSize.Width}px client area and a " +
-            $"readout ending at x={compactTokenBounds.Right}.");
+            tokenBounds.Right <= tracker.ClientSize.Width,
+            $"At minimum size the send-token readout ends at x={tokenBounds.Right}, " +
+            $"outside the {tracker.ClientSize.Width}px client area.");
         Console.WriteLine(
-            $"  Compact minimum: window {shrunk.Width}x{shrunk.Height} at scale " +
+            $"  Tracker minimum: window {shrunk.Width}x{shrunk.Height} at scale " +
             $"{small:0.###}, tower {tower.Width}x{tower.Height}.");
 
-        // Back to the size the mode opened at, so the round trip below starts
-        // from where it started.
-        window.Size = compactSize;
-        window.PerformLayout();
+        tracker.Size = openedAt;
+        tracker.PerformLayout();
 
-        // Switching back has to restore the full window exactly, panels
-        // included - the compact layout borrowed them, it does not own them.
-        window.SetCompactMode(false);
-        window.PerformLayout();
-        Require(!window.IsCompactMode, "The window did not leave compact mode.");
+        // Closing the tracker hides it. Everything in here is the run's state
+        // and it keeps arriving whether the window is up or not, so a close
+        // that disposed it would quietly reset the tracker mid-session.
+        var feed = (RichTextBox)activity!;
+        _ = feed.Handle;
+        window.UpdateIncoming(
+        [
+            new(0x0AD2_0101, "Pita Fruit", "Sandknight"),
+            new(0x0AD2_0102, "Medicinal Herb", "Wugga"),
+        ]);
+        window.AppendTransfer(new ClientTransfer(
+            ClientTransferKind.Sent, "Pita Fruit", "Sandknight", "Wugga", false, false));
+        string staged = feed.Text;
         Require(
-            window.Size == fullSize,
-            $"Returning to full mode left the window {window.Size.Width}x" +
-            $"{window.Size.Height} instead of {fullSize.Width}x{fullSize.Height}.");
-        Require(
-            incoming.LayoutMode == IncomingItemsLayout.HorizontalIcons,
-            "The incoming queue stayed vertical after returning to full mode.");
-        Require(
-            feed.Text == stagedFeed,
-            "The activity feed lost its scrollback on the way back to full mode.");
-        Control? server = FindNamed(window, "ServerBox");
-        Require(
-            server is not null && IsInActiveShell(server, window),
-            "The connection fields did not come back with full mode.");
-        Rectangle restoredTower = OffsetWithin(tower, window);
-        Rectangle restoredIncoming = OffsetWithin(incoming, window);
-        Require(
-            restoredIncoming.Left == restoredTower.Left &&
-            restoredIncoming.Right == restoredTower.Right,
-            $"After returning to full mode the incoming queue spans x=" +
-            $"{restoredIncoming.Left}-{restoredIncoming.Right} against the tower's " +
-            $"x={restoredTower.Left}-{restoredTower.Right}; they must line up again.");
-        Require(
-            restoredTower.Bottom <= window.ClientSize.Height,
-            "The tower is clipped after returning to full mode.");
+            staged.Contains("Sandknight sent Pita Fruit to Wugga.", StringComparison.Ordinal),
+            "The activity feed did not accept a line staged while the tracker was closed.");
 
-        // Each mode remembers its own size, so a second visit must not throw
-        // away whatever the player resized it to.
-        Size firstCompactSize = compactSize;
-        window.SetCompactMode(true);
-        window.PerformLayout();
+        // Shown well off-screen: this is a diagnostic run, not a reason to
+        // throw a window at whoever is watching the console.
+        tracker.StartPosition = FormStartPosition.Manual;
+        tracker.ShowInTaskbar = false;
+        tracker.Location = new Point(-30_000, -30_000);
+        tracker.Show();
+        Require(window.IsTrackerOpen, "A shown tracker did not report itself as open.");
+        tracker.Hide();
         Require(
-            window.Size == firstCompactSize,
-            $"Re-entering compact mode resized the window to {window.Size.Width}x" +
-            $"{window.Size.Height} instead of the remembered {firstCompactSize.Width}x" +
-            $"{firstCompactSize.Height}.");
-        window.SetCompactMode(false);
+            !window.IsTrackerOpen && !tracker.IsDisposed,
+            "Hiding the tracker disposed it, taking the session state with it.");
+        tracker.Show();
+        Require(
+            feed.Text == staged && tracker.IsLive,
+            "Reopening the tracker lost the session scrollback or its live state.");
+        tracker.Hide();
     }
-
-    /// <summary>
-    /// Which of the window's two layouts a control currently lives in.
-    ///
-    /// <para><c>Control.Visible</c> cannot answer this: it folds in every
-    /// ancestor's visibility, and an unshown form reports its whole tree as
-    /// hidden. Shell membership is the invariant the mode switch actually
-    /// maintains anyway - a control is shown exactly when it sits under the
-    /// shell that is currently up.</para>
-    /// </summary>
-    private static string? ShellOf(Control child, Control window)
-    {
-        Control? current = child;
-        while (current is not null && current.Parent is not null &&
-            current.Parent != window)
-        {
-            current = current.Parent;
-        }
-        return current?.Parent == window ? current.Name : null;
-    }
-
-    private static bool IsInActiveShell(Control child, ConnectionWindow window) =>
-        ShellOf(child, window) ==
-            (window.IsCompactMode ? "CompactShell" : "FullShell");
 
     private static Rectangle OffsetWithin(Control child, Control ancestor)
     {
@@ -4732,6 +5163,22 @@ internal static class SelfTest
         Require(
             AzureDreamsPlayerYaml.Build("Koh", false, 3, 50).Contains("  traps: false"),
             "Traps-off did not survive into the generated YAML.");
+        // The two toggles: on by default, spelled as the APWorld reads them.
+        Require(
+            yaml.Contains("  hint_system: true") && yaml.Contains("  temper_system: true") &&
+            yaml.Contains("  carrier_system: true"),
+            "The generated YAML does not carry hint_system / temper_system / carrier_system "
+            + "on by default.");
+        string toggledOff = AzureDreamsPlayerYaml.Build(
+            "Koh", false, 3, 50, hintSystem: false, temperSystem: false, carrierSystem: false);
+        Require(
+            toggledOff.Contains("  hint_system: false") &&
+            toggledOff.Contains("  temper_system: false") &&
+            toggledOff.Contains("  carrier_system: false"),
+            "A toggled-off system did not survive into the generated YAML.");
+        Require(
+            AzureDreamsPlayerYaml.DefaultHintSystem && AzureDreamsPlayerYaml.DefaultTemperSystem,
+            "The toggle defaults drifted from the APWorld's (both on).");
         // Accessibility is deliberately absent: every keycard must be
         // obtained, so there is nothing for it to change yet.
         Require(
@@ -4828,6 +5275,14 @@ internal static class SelfTest
             var balancing =
                 (NumericUpDown)dialog.Controls.Find("YamlProgressionBalancing", true).Single();
             var slot = (TextBox)dialog.Controls.Find("YamlSlotName", true).Single();
+            var hints = (CheckBox)dialog.Controls.Find("YamlHintSystem", true).Single();
+            var temper = (CheckBox)dialog.Controls.Find("YamlTemperSystem", true).Single();
+            Require(
+                hints.Checked && temper.Checked,
+                "The hint / temper toggles do not open enabled, unlike the APWorld defaults.");
+            Require(
+                slot.Text.Length == 0,
+                "The slot name field is not empty when no saved slot is given.");
             Require(
                 dialog.Controls.Find("YamlDevelopmentBanner", true).Length == 1,
                 "The development banner is missing from the Create YAML dialog.");
@@ -4859,6 +5314,8 @@ internal static class SelfTest
                          "YamlHelpTraps",
                          "YamlHelpTrapChance",
                          "YamlHelpProgressionBalancing",
+                         "YamlHelpHintSystem",
+                         "YamlHelpTemperSystem",
                      })
             {
                 Control[] found = dialog.Controls.Find(bubbleName, true);
@@ -4869,6 +5326,21 @@ internal static class SelfTest
                     found[0].Tag is string help && help.Trim().Length > 0,
                     $"The help bubble {bubbleName} carries no hover text.");
             }
+        }
+
+        // The saved slot name is loaded into the dialog - read, never written
+        // back: the dialog has no settings to write to. Trimmed to the cap.
+        using (var prefilled = new CreateYamlDialog(matched, "  Septic  "))
+        {
+            var slot = (TextBox)prefilled.Controls.Find("YamlSlotName", true).Single();
+            Require(slot.Text == "Septic", "The saved slot name was not prefilled (or not trimmed).");
+        }
+        using (var prefilled = new CreateYamlDialog(matched, new string('A', 20)))
+        {
+            var slot = (TextBox)prefilled.Controls.Find("YamlSlotName", true).Single();
+            Require(
+                slot.Text.Length == AzureDreamsPlayerYaml.MaxSlotNameLength,
+                "A saved slot name longer than the cap was not trimmed on prefill.");
         }
     }
 

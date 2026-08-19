@@ -46,6 +46,10 @@ MARKER_SLOT_COUNT = patch.MARKER_SLOT_COUNT
 
 TOWER_FLOOR_COUNT = 39
 LOCATION_COUNT = patch.LOCATION_COUNT
+# Nothing here multiplies the floor by the slot count any more: the journal is
+# one byte per floor and the bit is the slot (patch.PERSISTENT_LOCATION_MASK_OFFSET).
+# The `sll t2,a0,1 / addu / sll 2` in the put-in guard is the ground-entity
+# record stride (x12), not a location index - it looks like the bug and is not.
 
 # --- vanilla seams -----------------------------------------------------------
 
@@ -94,7 +98,11 @@ FLOOR_CONTEXT_POINTER_ADDRESS = 0x800E_3D7C
 GROUND_ITEM_DESCRIPTORS_ADDRESS = 0x800E_3548
 GROUND_ITEM_ENTITIES_ADDRESS = 0x800E_36C8
 CURRENT_FLOOR_ADDRESS = 0x8008_146C
-COLLECTION_JOURNAL_ADDRESS = 0x8001_5FD0
+# The tower journal: ADSV +0x10, one byte per floor. It was a hard-coded
+# 0x8001_5FD0 (ADSV v3's mask) until the v4 re-lay moved the record.
+COLLECTION_JOURNAL_ADDRESS = (
+    patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_LOCATION_MASK_OFFSET
+)
 
 FIND_ARRAY_INDEX_ADDRESS = 0x8004_22A8
 CLEAR_TILE_FLAGS_ADDRESS = 0x8009_A3D0
@@ -317,41 +325,35 @@ def build_put_in_guard() -> bytes:
     )
     _emit_marker_test(b, pointer=17, reject="vanilla")
 
-    # Location index, the same arithmetic the spawner and the collect hook use:
-    # two checks per floor, floor number carried in g_current_floor_number.
-    #
-    # Those two also range-check the floor before combining it with the slot.
-    # Here that is redundant: the marker test has already proved the slot is
-    # below two, so the single `index < LOCATION_COUNT` test below rejects
-    # every floor that could produce an out-of-range index, and it is the
-    # journal byte index that has to be bounded.
+    # Journal byte = floor - 1, bounded by the floor count; the marker test
+    # has already bounded the slot. Same shape as the payload's spawner and
+    # collect hook (tools/Rebuild-AdapGameplayPayload.py converts those).
     b.emit(
-        patch._i(0x24, 17, 9, 2),  # lbu t1,2(s1)   slot
+        patch._i(0x24, 17, 9, 2),       # lbu   t1,2(s1)     slot
         patch._i(0x0F, 0, 8, 0x8008),
-        patch._i(0x25, 8, 10, 0x146C),  # lhu t2,floor
+        patch._i(0x25, 8, 10, 0x146C),  # lhu   t2,floor
         0,
-        patch._i(0x09, 10, 10, -1),
-        patch._r(0, 10, 10, 1, 0x00),  # sll t2,t2,1
-        patch._r(10, 9, 10, 0, 0x21),  # addu t2,t2,t1
-        patch._i(0x0B, 10, 11, LOCATION_COUNT),
+        patch._i(0x09, 10, 10, -1),     # addiu t2,t2,-1     journal byte = floor-1
+        patch._i(0x0B, 10, 11, patch.PERSISTENT_TOWER_MASK_FLOORS),
     )
     b.branch(0x04, 11, 0, "vanilla")
     b.emit(0)
 
-    # Set the location's bit in the save-backed collection journal.
+    # Set the location's bit: journal[floor - 1] |= 1 << slot. One byte per
+    # floor means no multiply and no bit-index split - the arithmetic that used
+    # to live here was unrolled for two slots per floor and broke silently when
+    # the count changed. The marker test has already bounded the slot.
     b.emit(
-        patch._r(0, 10, 11, 3, 0x02),  # srl t3,t2,3
-        patch._i(0x0C, 10, 10, 7),  # andi t2,t2,7
         patch._i(0x09, 0, 12, 1),
-        patch._r(10, 12, 12, 0, 0x04),  # sllv t4,t4,t2
+        patch._r(9, 12, 12, 0, 0x04),   # sllv  t4,t4,t1     1 << slot
     )
     patch._load_address(b, 8, COLLECTION_JOURNAL_ADDRESS)
     b.emit(
-        patch._r(8, 11, 8, 0, 0x21),  # addu t0,t0,t3
-        patch._i(0x24, 8, 10, 0),  # lbu t2,0(t0)
+        patch._r(8, 10, 8, 0, 0x21),    # addu  t0,t0,t2
+        patch._i(0x24, 8, 10, 0),       # lbu   t2,0(t0)
         0,
-        patch._r(10, 12, 10, 0, 0x25),  # or t2,t2,t4
-        patch._i(0x28, 8, 10, 0),  # sb t2,0(t0)
+        patch._r(10, 12, 10, 0, 0x25),  # or    t2,t2,t4
+        patch._i(0x28, 8, 10, 0),       # sb    t2,0(t0)
     )
 
     # The generated placement text, composed exactly as the walk-over pickup

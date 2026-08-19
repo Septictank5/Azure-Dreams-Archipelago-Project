@@ -17,7 +17,11 @@ internal readonly record struct AzureDreamsIntroRestoreResult(
     bool BlocksNormalSynchronization,
     bool CheckpointLifecycleComplete,
     AzureDreamsIntroRestoreEvent Event,
-    AzureDreamsCheckpointMetadata? Checkpoint);
+    AzureDreamsCheckpointMetadata? Checkpoint,
+    // Server-confirmed checks merged into the restored save block before it
+    // landed (see AzureDreamsTownCheckpoint.TryRestore). Zero unless a
+    // checkpoint was restored this call.
+    int MergedChecks = 0);
 
 /// <summary>
 /// Services the explicit game/client handshake embedded in the angel and
@@ -43,11 +47,15 @@ internal static class AzureDreamsIntroRestore
     public const int TransitionDelayLoopOffset = 0x2f;
     public const uint TransitionDelayLoopAddress =
         ReturningAngelScriptAddress + TransitionDelayLoopOffset;
+    // Both markers are ADSV fields (v4 gave them a word of their own; they
+    // used to squat in the old 10-byte location mask's slack at +0x1A/+0x1B).
     public const uint ReturningPitaSkipMarkerAddress =
-        AzureDreamsReceiveState.PersistentStateAddress + 0x1a;
+        AzureDreamsReceiveState.PersistentStateAddress +
+        AzureDreamsReceiveState.IntroRestoreMarkerOffset;
     public const byte ReturningPitaSkipMarkerValue = 1;
     public const uint FirstRunReadyMarkerAddress =
-        AzureDreamsReceiveState.PersistentStateAddress + 0x1b;
+        AzureDreamsReceiveState.PersistentStateAddress +
+        AzureDreamsReceiveState.FirstRunReadyMarkerOffset;
     public const byte FirstRunReadyMarkerValue = 1;
 
     // Original angel portrait/dialogue prefix, full-width "Welcome back, ",
@@ -116,7 +124,8 @@ internal static class AzureDreamsIntroRestore
         ref bool introWindowClosed,
         out AzureDreamsIntroRestoreResult result,
         out string message,
-        string? snapshotDirectory = null)
+        string? snapshotDirectory = null,
+        IEnumerable<long>? serverCheckedLocations = null)
     {
         result = default;
         if (expectedIdentity.Signature is null ||
@@ -362,7 +371,9 @@ internal static class AzureDreamsIntroRestore
             if (!AzureDreamsTownCheckpoint.TryRestore(
                     memory,
                     expectedIdentity,
+                    serverCheckedLocations,
                     out AzureDreamsCheckpointMetadata metadata,
+                    out int mergedChecks,
                     out message,
                     snapshotDirectory))
             {
@@ -417,7 +428,8 @@ internal static class AzureDreamsIntroRestore
                 false,
                 true,
                 AzureDreamsIntroRestoreEvent.CheckpointRestored,
-                metadata);
+                metadata,
+                mergedChecks);
             return true;
         }
 
@@ -426,7 +438,9 @@ internal static class AzureDreamsIntroRestore
             if (!AzureDreamsTownCheckpoint.TryRestore(
                     memory,
                     expectedIdentity,
+                    serverCheckedLocations,
                     out AzureDreamsCheckpointMetadata metadata,
+                    out int mergedChecks,
                     out message,
                     snapshotDirectory))
             {
@@ -441,7 +455,8 @@ internal static class AzureDreamsIntroRestore
                 false,
                 true,
                 AzureDreamsIntroRestoreEvent.CheckpointRestored,
-                metadata);
+                metadata,
+                mergedChecks);
             return true;
         }
 

@@ -165,6 +165,46 @@ class TestTownReceivePatch(unittest.TestCase):
         self.assertFalse(hasattr(town_receive, "_build_dispatcher"))
         self.assertFalse(hasattr(town_receive, "_build_notification_helper"))
 
+    def test_the_erase_does_not_eat_live_town_shop_data(self) -> None:
+        """The erase runs AFTER the shop payload is embedded, so a freed span
+        that overlaps a live town-shop region silently truncates it.
+
+        That is not hypothetical: the intro-state table at 0x3E0 declared its
+        end as DESCRIPTION_RESOLVER_OFFSET (0x420) and overlapped the freed
+        0x3F0..0x420 span for a year. It was invisible while the table held
+        two entries whose zero terminator landed in already-zero bytes, and it
+        silently dropped the third the moment one was added (2026-08-15).
+        """
+
+        slots = [None] * town_shop.SHOP_SLOT_COUNT
+        shop = town_shop.build_town_shop_payload(slots)
+        combined = town_receive.build_town_receive_payload(shop)
+        for start, end, name in town_receive.FREE_SLAB_SPANS:
+            self.assertEqual(
+                bytes(shop[start:end]),
+                bytes(end - start),
+                f"town-shop data at 0x{start:x}..0x{end:x} is erased by the "
+                f"freed span '{name}' - claim the span or move the data",
+            )
+            self.assertEqual(bytes(combined[start:end]), bytes(end - start))
+
+    def test_the_intro_state_table_survives_the_combined_build(self) -> None:
+        """End to end: every intro-state write reaches the built payload."""
+
+        slots = [None] * town_shop.SHOP_SLOT_COUNT
+        combined = town_receive.build_town_receive_payload(
+            town_shop.build_town_shop_payload(slots)
+        )
+        offset = town_shop.INTRO_STATE_TABLE_OFFSET
+        pairs = []
+        while True:
+            address, mask = struct.unpack_from("<II", combined, offset)
+            if address == 0:
+                break
+            pairs.append((address, mask))
+            offset += 8
+        self.assertEqual(pairs, list(town_shop.INTRO_STATE_WRITES))
+
 
 class TestTownReceiveQueue(unittest.TestCase):
     """The receive queue Nada drains from inside her own conversation.

@@ -23,6 +23,23 @@ def _ppf_writes(ppf: bytes) -> dict[int, int]:
     return writes
 
 
+_PAYLOAD_FILE_OFFSET = 0x0F_F220   # DUNGEON.BIN offset of the payload image
+_PAYLOAD_SIZE = 2_212
+
+
+def _base_payload() -> bytes:
+    """The tower gameplay payload as the shipped base patch writes it."""
+
+    ppf = (Path(__file__).parents[1] / "data" / "azure_dreams_base.ppf").read_bytes()
+    writes = _ppf_writes(ppf)
+    out = bytearray()
+    for index in range(_PAYLOAD_SIZE):
+        sector, within = divmod(_PAYLOAD_FILE_OFFSET + index, patch.FORM1_USER_SIZE)
+        raw = (patch.DUNGEON_BIN_BASE_LBA + sector) * patch.RAW_SECTOR_SIZE + 24 + within
+        out.append(writes[raw])
+    return bytes(out)
+
+
 def _contains_written_bytes(writes: dict[int, int], expected: bytes) -> bool:
     return any(
         all(writes.get(offset + index) == value for index, value in enumerate(expected))
@@ -230,7 +247,7 @@ class TestAzureDreamsPatch(unittest.TestCase):
         return appended, returned, destination
 
     def test_composer_renders_a_local_placement(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         block = patch.build_seed_block(b"12345678", placements)
         appended, returned, destination = self._run_composer(block, floor=1, slot=0)
         self.assertEqual(
@@ -244,7 +261,7 @@ class TestAzureDreamsPatch(unittest.TestCase):
         self.assertEqual(returned, destination + len(appended))
 
     def test_composer_renders_a_remote_placement(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         placements[1] = patch.LocationPlacement("Master Sword", "Player5", True)
         block = patch.build_seed_block(b"12345678", placements)
         appended, returned, destination = self._run_composer(block, floor=1, slot=1)
@@ -261,16 +278,17 @@ class TestAzureDreamsPatch(unittest.TestCase):
         self.assertEqual(returned, destination + len(appended))
 
     def test_composer_indexes_by_floor_and_slot(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
-        # Floor 20, slot 1 is index (20 - 1) * 2 + 1 = 39.
-        placements[39] = patch.LocationPlacement("Wind Crystal", "Reven", True)
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
+        # Floor 20, slot 1. Derived, because the slots-per-floor count moves.
+        index = (20 - 1) * patch.MARKER_SLOT_COUNT + 1
+        placements[index] = patch.LocationPlacement("Wind Crystal", "Reven", True)
         block = patch.build_seed_block(b"12345678", placements)
         appended, _, _ = self._run_composer(block, floor=20, slot=1, placements=placements)
         self.assertIn(patch.encode_battle_message("Wind Crystal"), appended)
         self.assertIn(patch.encode_battle_message("Reven"), appended)
 
     def test_composer_appends_nothing_outside_the_tower(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         block = patch.build_seed_block(b"12345678", placements)
         # Floor 0 is not a tower floor; the cursor must come back untouched.
         appended, returned, destination = self._run_composer(block, floor=0, slot=0)
@@ -278,7 +296,7 @@ class TestAzureDreamsPatch(unittest.TestCase):
         self.assertEqual(returned, destination)
 
     def test_seed_block_contains_messages_and_ownership_bits(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         placements[1] = patch.LocationPlacement("Master Sword", "Player5", True)
         placements[6] = patch.LocationPlacement(
             "Progressive Keycard",
@@ -291,11 +309,16 @@ class TestAzureDreamsPatch(unittest.TestCase):
         self.assertEqual(len(block), patch.SEED_BLOCK_SIZE)
         self.assertEqual(
             struct.unpack_from("<IHH", block),
-            (patch.SEED_MAGIC, patch.SEED_VERSION, 78),
+            (patch.SEED_MAGIC, patch.SEED_VERSION, patch.LOCATION_COUNT),
         )
         self.assertEqual(block[8:16], b"12345678")
         self.assertEqual(block[0x10] & 0b11, 0b10)
-        self.assertEqual(block[patch.FLOOR_KEYCARD_MASK_OFFSET] & 0b1111, 0b1000)
+        # The keycard mask is per FLOOR, so the bit is the placement index
+        # divided by the slots-per-floor count - derived, because that moves.
+        self.assertEqual(
+            block[patch.FLOOR_KEYCARD_MASK_OFFSET] & 0xFF,
+            1 << (6 // patch.MARKER_SLOT_COUNT),
+        )
         self.assertEqual(
             block[
                 patch.ELEVATOR_RETURN_DESCRIPTOR_OFFSET :
@@ -335,7 +358,13 @@ class TestAzureDreamsPatch(unittest.TestCase):
             self.assertTrue(block[slot:].startswith(patch.encode_battle_message(text)))
 
         # Only floor 1's text is resident; floor 2+ item names are in the bank.
-        self.assertEqual(block.count(patch.encode_battle_message("Gold")), 1)
+        # Derived: floor 1 holds MARKER_SLOT_COUNT placements, and how many of
+        # them are "Gold" moves when the slot count does.
+        floor_one = placements[: patch.MARKER_SLOT_COUNT]
+        self.assertEqual(
+            block.count(patch.encode_battle_message("Gold")),
+            sum(1 for placement in floor_one if placement.item_name == "Gold"),
+        )
 
         # The per-floor bank: every sector's static content is byte-identical
         # to the resident window, and each carries its own floor's fields.
@@ -345,7 +374,10 @@ class TestAzureDreamsPatch(unittest.TestCase):
         self.assertEqual(pages[0], bytes(window))  # floor 1 == the baked page
         dynamic = set()
         for span_start, span_end in (
-            (patch.FLOOR_PAGE_HEADER_OFFSET, patch.FLOOR_PAGE_RECORDS_OFFSET + 6),
+            (
+                patch.FLOOR_PAGE_HEADER_OFFSET,
+                patch.FLOOR_PAGE_RECORDS_OFFSET + 3 * patch.MARKER_SLOT_COUNT,
+            ),
             (
                 patch.FLOOR_PAGE_PLAYER_SLOTS_OFFSET,
                 patch.FLOOR_PAGE_PLAYER_SLOTS_OFFSET
@@ -400,19 +432,62 @@ class TestAzureDreamsPatch(unittest.TestCase):
             len(initializer),
             patch.APPEND_LOCATION_MESSAGE_ADDRESS - patch.SEED_INIT_ADDRESS,
         )
-        self.assertEqual(patch.PERSISTENT_STATE_ADDRESS, 0x8001_5FC0)
-        self.assertEqual(patch.PERSISTENT_STATE_VERSION, 3)
-        self.assertEqual(patch.PERSISTENT_STATE_SIZE, 0x2C)
-        # The record must stay inside the reserved 0x40-byte save tail at
-        # buffer offset 0x5FC0.
-        self.assertLessEqual(patch.PERSISTENT_STATE_SIZE, 0x40)
-        self.assertEqual(patch.PERSISTENT_GOLD_GRANTED_OFFSET, 0x28)
-        self.assertEqual(patch.PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET, 0x1C)
-        self.assertEqual(patch.PERSISTENT_KEYCARD_LEVEL_OFFSET, 0x20)
-        self.assertEqual(patch.PERSISTENT_SHOP_MASK_OFFSET, 0x24)
+        # ADSV v4 (2026-08-15): a one-byte-per-floor tower journal, the town
+        # half of one unified mask, and the base moved DOWN into the free span
+        # below so the record's END is unchanged. This is the layout the
+        # client mirrors (AzureDreamsReceiveState), so it IS pinned here.
+        self.assertEqual(patch.PERSISTENT_STATE_ADDRESS, 0x8001_5F94)
+        self.assertEqual(patch.PERSISTENT_STATE_VERSION, 4)
+        self.assertEqual(patch.PERSISTENT_STATE_SIZE, 0x58)
+        # It must stay inside the save-backed scratch span, and its end must not
+        # reach the tenants above it (test_send_tokens owns that invariant).
+        self.assertGreaterEqual(patch.PERSISTENT_STATE_ADDRESS, 0x8001_5F00)
+        self.assertEqual(
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_STATE_SIZE, 0x8001_5FEC
+        )
+        self.assertEqual(patch.PERSISTENT_LOCATION_MASK_OFFSET, 0x10)
+        self.assertEqual(patch.PERSISTENT_TOWER_MASK_BYTES, 40)
+        self.assertGreaterEqual(
+            patch.PERSISTENT_TOWER_MASK_BYTES, patch.PERSISTENT_TOWER_MASK_FLOORS
+        )
+        self.assertEqual(patch.PERSISTENT_TOWN_MASK_BYTES, 16)
+        self.assertEqual(patch.PERSISTENT_LOCATION_MASK_BYTES, 56)
+        # The town half follows the tower journal and must stay word-aligned so
+        # the shop's whole-word store keeps working.
+        self.assertEqual(patch.PERSISTENT_SHOP_MASK_OFFSET, 0x38)
+        self.assertEqual(patch.PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET, 0x48)
+        self.assertEqual(patch.PERSISTENT_KEYCARD_LEVEL_OFFSET, 0x4C)
+        self.assertEqual(patch.PERSISTENT_GOLD_GRANTED_OFFSET, 0x50)
+        self.assertEqual(patch.PERSISTENT_INTRO_RESTORE_MARKER_OFFSET, 0x54)
+        self.assertEqual(patch.PERSISTENT_INTRO_FIRST_RUN_READY_OFFSET, 0x55)
         self.assertIn(
-            struct.pack("<II", patch._i(0x0F, 0, 11, 0x8001), patch._i(0x09, 11, 11, 0x5FC0)),
+            struct.pack(
+                "<II",
+                patch._i(0x0F, 0, 11, patch._upper(patch.PERSISTENT_STATE_ADDRESS)),
+                patch._i(0x09, 11, 11, patch._lower(patch.PERSISTENT_STATE_ADDRESS)),
+            ),
             initializer,
+        )
+        # Every module that touches ADSV derives from patch.py; the copies that
+        # went stale on the re-lay are gone.
+        from .. import alternate_pickup, town_receive, town_shop
+        self.assertEqual(town_shop.PERSISTENT_STATE_ADDRESS, patch.PERSISTENT_STATE_ADDRESS)
+        self.assertEqual(town_shop.PERSISTENT_STATE_SIZE, patch.PERSISTENT_STATE_SIZE)
+        self.assertEqual(town_shop.PERSISTENT_STATE_VERSION, patch.PERSISTENT_STATE_VERSION)
+        self.assertEqual(town_shop.PERSISTENT_SHOP_MASK_OFFSET, patch.PERSISTENT_SHOP_MASK_OFFSET)
+        self.assertEqual(town_shop.PERSISTENT_KEYCARD_LEVEL_OFFSET, patch.PERSISTENT_KEYCARD_LEVEL_OFFSET)
+        self.assertEqual(town_shop.PERSISTENT_GOLD_GRANTED_OFFSET, patch.PERSISTENT_GOLD_GRANTED_OFFSET)
+        self.assertEqual(
+            town_receive.PERSISTENT_RECEIVED_COUNT_ADDRESS,
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET,
+        )
+        self.assertEqual(
+            town_receive.INTRO_RESTORE_MARKER_ADDRESS,
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_INTRO_RESTORE_MARKER_OFFSET,
+        )
+        self.assertEqual(
+            alternate_pickup.COLLECTION_JOURNAL_ADDRESS,
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_LOCATION_MASK_OFFSET,
         )
 
         self.assertLessEqual(
@@ -438,6 +513,99 @@ class TestAzureDreamsPatch(unittest.TestCase):
         )
         prompt_offset = patch.ELEVATOR_RETURN_PROMPT_ADDRESS - patch.SEED_BLOCK_ADDRESS
         self.assertTrue(block[prompt_offset:].startswith(patch.encode_elevator_return_prompt()))
+
+    def test_both_initializers_zero_the_whole_v4_record_and_nothing_else(self) -> None:
+        """A fresh ADSV starts with every field after the signature at zero.
+
+        Both the seed page's initializer and the town core's write the record,
+        and 0.9.84 was a field nobody zeroed landing on a neighbour. Each is
+        run in the simulator over a record pre-filled with 0xFF, with guard
+        bytes on both sides: the header must be right, the span
+        `+0x10..+size` must be zero, and the guards must be untouched.
+        """
+
+        base = patch.PERSISTENT_STATE_ADDRESS
+        size = patch.PERSISTENT_STATE_SIZE
+        signature = b"SIGNATUR"
+
+        def fresh_memory() -> mips_sim.Memory:
+            memory = mips_sim.Memory()
+            memory.load_bytes(base - 16, b"\xA5" * 16)
+            memory.load_bytes(base, b"\xFF" * size)
+            memory.load_bytes(base + size, b"\x5A" * 16)
+            return memory
+
+        # The seed initializer also seeds the send-token pair on purpose; those
+        # two words are excluded from its guard and asserted separately.
+        token_words = {
+            patch.SEND_TOKEN_COUNT_ADDRESS - (base + size),
+            patch.SEND_TOKEN_BANKED_ADDRESS - (base + size),
+        }
+
+        def check(memory: mips_sim.Memory, who: str, skip: set[int] = frozenset()) -> None:
+            self.assertEqual(memory.read32(base), patch.PERSISTENT_STATE_MAGIC, who)
+            self.assertEqual(
+                memory.read32(base + 4),
+                (patch.PERSISTENT_STATE_SIZE << 16) | patch.PERSISTENT_STATE_VERSION,
+                who,
+            )
+            self.assertEqual(
+                bytes(memory.read8(base + 8 + i) for i in range(8)), signature, who
+            )
+            for offset in range(patch.PERSISTENT_LOCATION_MASK_OFFSET, size):
+                self.assertEqual(memory.read8(base + offset), 0, f"{who} +0x{offset:X}")
+            # The ball charger's level word is the one thing below the base
+            # both initializers may touch - it starts at zero with the record.
+            self.assertEqual(patch.BALL_CHARGE_LEVEL_ADDRESS, base - 4)
+            self.assertEqual(memory.read32(patch.BALL_CHARGE_LEVEL_ADDRESS), 0, f"{who} ball level")
+            for guard in range(12):
+                self.assertEqual(memory.read8(base - 16 + guard), 0xA5, f"{who} below")
+            for guard in range(16):
+                if guard & ~3 in skip:
+                    continue
+                self.assertEqual(memory.read8(base + size + guard), 0x5A, f"{who} above")
+
+        # The seed page's initializer: reads the seed block header for the
+        # signature and returns through `jr ra`.
+        memory = fresh_memory()
+        memory.load_bytes(patch.SEED_INIT_ADDRESS, patch._build_seed_state_initializer())
+        memory.write32(patch.SEED_BLOCK_ADDRESS, patch.SEED_MAGIC)
+        memory.load_bytes(patch.SEED_BLOCK_ADDRESS + 8, signature)
+        mips_sim.Cpu(memory).run(patch.SEED_INIT_ADDRESS)
+        check(memory, "seed initializer", token_words)
+        self.assertEqual(
+            memory.read32(patch.SEND_TOKEN_COUNT_ADDRESS), patch.SEND_TOKEN_STARTING_COUNT
+        )
+        self.assertEqual(memory.read32(patch.SEND_TOKEN_BANKED_ADDRESS), 0)
+        # The shortcut carrier, directly above ADSV's end, is untouched.
+        self.assertEqual(memory.read32(patch.SHORTCUT_PENDING_LEVEL_ADDRESS), 0x5A5A_5A5A)
+        # Test builds may seed the keycard level; the shipped value is zero.
+        if patch.TEST_STARTING_KEYCARD_LEVEL:
+            self.assertEqual(
+                memory.read32(base + patch.PERSISTENT_KEYCARD_LEVEL_OFFSET),
+                patch.TEST_STARTING_KEYCARD_LEVEL,
+            )
+
+        # The town core's initializer: reads the slab's signature copy and
+        # tail-jumps into the intro-state writer on the fresh path.
+        memory = fresh_memory()
+        memory.load_bytes(
+            town_shop.STATE_INITIALIZER_ADDRESS, town_shop._build_state_initializer()
+        )
+        memory.load_bytes(
+            town_shop.SHOP_CORE_ADDRESS + town_shop.SEED_SIGNATURE_OFFSET, signature
+        )
+        exits: list[int] = []
+
+        def intro_writer(cpu: mips_sim.Cpu) -> None:
+            exits.append(cpu.registers[31])
+            cpu.registers[31] = 0xDEAD_0000
+
+        mips_sim.Cpu(
+            memory, {town_shop.INTRO_STATE_WRITER_ADDRESS: intro_writer}
+        ).run(town_shop.STATE_INITIALIZER_ADDRESS)
+        self.assertEqual(len(exits), 1, "the fresh path tails into the intro writer")
+        check(memory, "town initializer")
 
     def test_the_prompt_callback_never_returns_a_null_menu(self) -> None:
         """0.9.36 softlocked by suppressing the prompt with a null return.
@@ -512,7 +680,7 @@ class TestAzureDreamsPatch(unittest.TestCase):
         )
 
     def test_seed_block_contains_floor_safe_compact_inventory_hud_code(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         block = patch.build_seed_block(b"12345678", placements)
         post = patch._build_inventory_hud_post_registration_hook()
         refresh = patch._build_inventory_hud_refresh()
@@ -595,12 +763,18 @@ class TestAzureDreamsPatch(unittest.TestCase):
         )
 
     def test_compact_inventory_hud_refresh_reads_save_backed_keycard_level(self) -> None:
+        _KEYCARD_ADDRESS = (
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_KEYCARD_LEVEL_OFFSET
+        )
         refresh = patch._build_inventory_hud_refresh()
         self.assertIn(
             struct.pack(
                 "<III",
-                patch._i(0x0F, 0, 8, 0x8001),
-                patch._i(0x09, 8, 8, 0x5FE0),
+                # Derived, not pinned: ADSV's fields move when the journal
+                # grows, and pinning the literal made a deliberate v4 layout
+                # change look like a regression.
+                patch._i(0x0F, 0, 8, patch._upper(_KEYCARD_ADDRESS)),
+                patch._i(0x09, 8, 8, patch._lower(_KEYCARD_ADDRESS)),
                 patch._i(0x24, 8, 11, 0),
             ),
             refresh,
@@ -620,21 +794,30 @@ class TestAzureDreamsPatch(unittest.TestCase):
 
     def test_render_resolver_uses_gift_for_every_valid_location(self) -> None:
         resolver = patch._build_render_resolver()
+        # The three identity tests all branch to the vanilla tail-call, which
+        # is the second-to-last word. Derived, not pinned: the body between
+        # them and the tail changed shape when the slot test stopped folding
+        # the floor into a bit index.
+        local = len(resolver) // 4 - 2
+        self.assertTrue(resolver.startswith(struct.pack(
+            "<9I",
+            patch._i(0x24, 4, 9, 0),
+            patch._i(0x09, 0, 10, patch.MARKER_ID),
+            patch._i(0x05, 9, 10, local - 3),
+            patch._i(0x24, 4, 9, 1),
+            patch._i(0x09, 0, 10, patch.MARKER_CATEGORY),
+            patch._i(0x05, 9, 10, local - 6),
+            patch._i(0x24, 4, 9, 3),
+            patch._i(0x09, 0, 10, patch.MARKER_STATUS),
+            patch._i(0x05, 9, 10, local - 9),
+        )))
+        # The slot is bounded on its own, by the slot count - no
+        # `(floor-1) * slots + slot` fold anywhere in the resolver.
         self.assertIn(
-            struct.pack(
-                "<9I",
-                patch._i(0x24, 4, 9, 0),
-                patch._i(0x09, 0, 10, patch.MARKER_ID),
-                patch._i(0x05, 9, 10, 30),
-                patch._i(0x24, 4, 9, 1),
-                patch._i(0x09, 0, 10, patch.MARKER_CATEGORY),
-                patch._i(0x05, 9, 10, 27),
-                patch._i(0x24, 4, 9, 3),
-                patch._i(0x09, 0, 10, patch.MARKER_STATUS),
-                patch._i(0x05, 9, 10, 24),
-            ),
+            struct.pack("<I", patch._i(0x0B, 11, 11, patch.MARKER_SLOT_COUNT)),
             resolver,
         )
+        self.assertNotIn(struct.pack("<I", patch._r(0, 10, 10, 1, 0x00)), resolver)
         self.assertIn(
             struct.pack(
                 "<II",
@@ -713,12 +896,37 @@ class TestAzureDreamsPatch(unittest.TestCase):
             )
         )
 
-    def test_base_patch_uses_save_tail_for_collection_journal(self) -> None:
-        base_patch = (Path(__file__).parents[1] / "data" / "azure_dreams_base.ppf").read_bytes()
-        self.assertIn(struct.pack("<I", patch._i(0x09, 8, 8, 0x5FD0)), base_patch)
-        self.assertIn(struct.pack("<I", patch._i(0x09, 11, 11, 0x5FD0)), base_patch)
-        self.assertNotIn(struct.pack("<I", patch._i(0x09, 8, 8, 0x3710)), base_patch)
-        self.assertNotIn(struct.pack("<I", patch._i(0x09, 11, 11, 0x3710)), base_patch)
+    def test_base_patch_payload_addresses_the_v4_journal(self) -> None:
+        """The binary payload's spawner and collect hook follow ADSV.
+
+        The payload has no source; tools/Rebuild-AdapGameplayPayload.py
+        rewrites its two journal sites in place. Both must name the journal
+        at ADSV +0x10 (byte per floor), and neither may still carry the v3
+        `0x5FD0` address or the `sll 1` fold that broke when the slot count
+        moved. PayloadJournalTests below runs both routines in the simulator.
+        """
+        payload = _base_payload()
+        journal = patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_LOCATION_MASK_OFFSET
+        for register in (8, 11):
+            self.assertIn(
+                struct.pack(
+                    "<II",
+                    patch._i(0x0F, 0, register, patch._upper(journal)),
+                    patch._i(0x09, register, register, patch._lower(journal)),
+                ),
+                payload,
+            )
+            self.assertNotIn(struct.pack("<I", patch._i(0x09, register, register, 0x5FD0)), payload)
+        # The spawner's seed-header gate follows LOCATION_COUNT.
+        self.assertEqual(
+            struct.unpack_from("<I", payload, 0x801D_97EC - patch.TOWER_GAMEPLAY_BASE_ADDRESS)[0],
+            patch._i(0x09, 0, 10, patch.LOCATION_COUNT),
+        )
+        # And the ground spawner still stops at the ground slots.
+        self.assertEqual(
+            struct.unpack_from("<I", payload, 0x801D_9968 - patch.TOWER_GAMEPLAY_BASE_ADDRESS)[0],
+            patch._i(0x0A, 16, 8, patch.MARKER_GROUND_SLOT_COUNT),
+        )
 
     def test_base_patch_disables_the_earthquake_system(self) -> None:
         # The per-turn earthquake callback's prologue becomes
@@ -898,11 +1106,16 @@ class TestAzureDreamsPatch(unittest.TestCase):
         # anything in `alternate_pickup`; `tools/Verify-AdapDisc.py` on a built
         # disc is what catches a stale stream, because nothing in this suite can
         # decompress it.
+        #
+        # 2026-08-15: the put-in guard shrank by 16 bytes when the journal went
+        # byte-per-floor (ADSV v4), so both jumps moved and the stream was
+        # re-encoded; the pre-change patch is
+        # `.logs/azure_dreams_base-pre-adsv-v4-journal-20260815.ppf`.
         stream_1 = read_written_form1_extent(0x4A3014, 0x3588)
         stream_2 = read_written_form1_extent(0x4A7014, 0x37B0)
         self.assertEqual(
             hashlib.sha256(stream_1).hexdigest().upper(),
-            "95248404171B7739287E29931DA77D9AE02B488032E6A5DEDD2D4BAEE8A56090",
+            "BB9BFEB9E9284F54DD320D8CF9F8C22609F2C6FF5893E2D08FB489645BAAC400",
         )
         # Stream 2 carries the direct inventory-module HUD at its tail, and its
         # refresh routine at 0x80024C00 reads the AP mailbox for the clearance
@@ -1274,6 +1487,459 @@ class FloorPageLoaderTests(unittest.TestCase):
             disc.seek(patch.FLOOR_PAGE_ANIMATOR_HOOK_RAW_OFFSET)
             words = struct.unpack("<II", disc.read(8))
         self.assertEqual(words, patch.FLOOR_PAGE_ANIMATOR_HOOK_ORIGINAL)
+
+
+class PayloadJournalTests(unittest.TestCase):
+    """The binary payload's two journal routines, run against ADSV v4.
+
+    `spawn_floor_locations` (payload +0xA0) places one marker per ground slot
+    whose journal bit is clear; `collect_floor_location` (+0x2B0) sets the
+    bit for a picked-up marker. Neither has source - the base patch carries
+    the bytes and tools/Rebuild-AdapGameplayPayload.py rewrote their journal
+    arithmetic for the byte-per-floor layout - so the simulator is how they
+    are proven.
+    """
+
+    SPAWNER = patch.SPAWN_FLOOR_LOCATIONS_ADDRESS
+    COLLECT = patch.COLLECT_FLOOR_LOCATION_ADDRESS
+    FLOOR_ADDRESS = 0x8008_146C
+    GROUND_DESCRIPTORS = 0x800E_3548
+    GROUND_ENTITIES = 0x800E_36C8
+    JOURNAL = patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_LOCATION_MASK_OFFSET
+
+    def _memory(self, floor: int) -> mips_sim.Memory:
+        memory = mips_sim.Memory()
+        memory.load_bytes(patch.TOWER_GAMEPLAY_BASE_ADDRESS, _base_payload())
+        memory.write32(patch.SEED_BLOCK_ADDRESS, patch.SEED_MAGIC)
+        memory.write32(
+            patch.SEED_BLOCK_ADDRESS + 4,
+            patch.SEED_VERSION | (patch.LOCATION_COUNT << 16),
+        )
+        memory.write32(patch.HIGH_MAILBOX_ADDRESS, 0x5041_4441)      # "ADAP"
+        memory.write32(patch.HIGH_MAILBOX_ADDRESS + 4, 3 | (0x100 << 16))
+        memory.write32(self.FLOOR_ADDRESS, floor)
+        return memory
+
+    def _spawn(self, memory: mips_sim.Memory) -> list[int]:
+        """Run the spawner; return the marker words it placed, in order."""
+
+        placed: list[int] = []
+        free = iter(range(5, 40))
+
+        def find_free_slot(cpu: mips_sim.Cpu) -> None:
+            cpu.registers[2] = next(free)
+
+        def pick_tile(cpu: mips_sim.Cpu) -> None:
+            cpu.memory.write8(cpu.registers[4], 7)
+            cpu.memory.write8(cpu.registers[5], 9)
+
+        def tile_free(cpu: mips_sim.Cpu) -> None:
+            cpu.registers[2] = 0
+
+        def make_sprite(cpu: mips_sim.Cpu) -> None:
+            cpu.registers[2] = 0x1234
+
+        def render(cpu: mips_sim.Cpu) -> None:
+            cpu.registers[2] = 0x8007_7950
+
+        stubs = {
+            0x800A_71F4: find_free_slot,
+            0x800A_4E2C: pick_tile,
+            0x8001_E110: tile_free,
+            0x800B_CA68: make_sprite,
+            0x8009_A21C: lambda cpu: None,
+            patch.RESOLVE_LOCATION_RENDER_ADDRESS: render,
+        }
+        mips_sim.Cpu(memory, stubs).run(self.SPAWNER)
+        for slot in range(64):
+            word = memory.read32(self.GROUND_DESCRIPTORS + slot * 4)
+            if word:
+                placed.append(word)
+        return placed
+
+    def test_the_spawner_places_only_the_ground_slots_of_an_untouched_floor(self) -> None:
+        for floor in (1, 7, 39):
+            with self.subTest(floor=floor):
+                memory = self._memory(floor)
+                self.assertEqual(
+                    self._spawn(memory),
+                    [patch.marker_descriptor_word(s) for s in range(patch.MARKER_GROUND_SLOT_COUNT)],
+                )
+
+    def test_the_spawner_skips_a_slot_whose_journal_bit_is_set(self) -> None:
+        memory = self._memory(12)
+        memory.write8(self.JOURNAL + 11, 1 << 0)          # floor 12, slot 0 collected
+        self.assertEqual(self._spawn(memory), [patch.marker_descriptor_word(1)])
+        memory = self._memory(12)
+        memory.write8(self.JOURNAL + 11, 0b11)
+        self.assertEqual(self._spawn(memory), [])
+        # A set bit on the NEIGHBOURING floor's byte changes nothing - which
+        # is exactly what the packed v3 layout got wrong when a bit moved.
+        memory = self._memory(12)
+        memory.write8(self.JOURNAL + 10, 0xFF)
+        memory.write8(self.JOURNAL + 12, 0xFF)
+        self.assertEqual(len(self._spawn(memory)), patch.MARKER_GROUND_SLOT_COUNT)
+
+    def test_the_spawner_reads_the_journal_at_adsv_and_nowhere_else(self) -> None:
+        # Fill the OLD v3 journal address with set bits; it must be ignored.
+        memory = self._memory(3)
+        memory.load_bytes(0x8001_5FD0, b"\xFF" * 10)
+        self.assertEqual(len(self._spawn(memory)), patch.MARKER_GROUND_SLOT_COUNT)
+
+    def test_the_spawner_refuses_a_floor_past_the_journal_and_a_foreign_header(self) -> None:
+        self.assertEqual(self._spawn(self._memory(40)), [])
+        self.assertEqual(self._spawn(self._memory(0)), [])
+        memory = self._memory(5)
+        memory.write32(patch.SEED_BLOCK_ADDRESS + 4, patch.SEED_VERSION | (78 << 16))
+        self.assertEqual(self._spawn(memory), [])
+
+    def _collect(self, memory: mips_sim.Memory, descriptor: int, slot_index: int = 4) -> bool:
+        """Run the collect hook on a ground descriptor; True if it journaled."""
+
+        descriptor_address = self.GROUND_DESCRIPTORS + slot_index * 4
+        memory.write32(descriptor_address, descriptor)
+        actor = 0x800E_3548 + 0x100   # anywhere with room for +0xA2/+0xBC
+        journaled: list[bool] = []
+
+        def append_message(cpu: mips_sim.Cpu) -> None:
+            cpu.registers[2] = cpu.registers[5]
+
+        def finish(cpu: mips_sim.Cpu) -> None:
+            journaled.append(True)
+
+        cpu = mips_sim.Cpu(
+            memory,
+            {
+                patch.APPEND_LOCATION_MESSAGE_ADDRESS: append_message,
+                0x8009_A3D0: lambda cpu: None,
+                0x8009_5418: finish,
+            },
+        )
+        cpu.registers[5] = descriptor_address     # a1: the descriptor
+        cpu.registers[17] = slot_index            # s1: ground entity index
+        cpu.registers[19] = 0x801F_D000           # s3: message cursor
+        cpu.registers[21] = actor                 # s5: Koh
+        cpu.run(self.COLLECT)
+        return bool(journaled)
+
+    def test_the_collect_hook_journals_every_slot_including_the_carriers(self) -> None:
+        for floor in (1, 20, 39):
+            for slot in range(patch.MARKER_SLOT_COUNT):
+                with self.subTest(floor=floor, slot=slot):
+                    memory = self._memory(floor)
+                    self.assertTrue(
+                        self._collect(memory, patch.marker_descriptor_word(slot))
+                    )
+                    self.assertEqual(memory.read8(self.JOURNAL + floor - 1), 1 << slot)
+                    for other in range(patch.PERSISTENT_TOWER_MASK_BYTES):
+                        if other != floor - 1:
+                            self.assertEqual(memory.read8(self.JOURNAL + other), 0)
+                    # It ORs: a neighbouring bit on the same floor survives.
+                    memory = self._memory(floor)
+                    memory.write8(self.JOURNAL + floor - 1, 0x80)
+                    self._collect(memory, patch.marker_descriptor_word(slot))
+                    self.assertEqual(memory.read8(self.JOURNAL + floor - 1), 0x80 | (1 << slot))
+
+    def test_the_collect_hook_rejects_what_it_should(self) -> None:
+        memory = self._memory(5)
+        # An out-of-range slot, a floor past the journal, and an ordinary item.
+        self.assertFalse(
+            self._collect(memory, patch.marker_descriptor_word(0) | (patch.MARKER_SLOT_COUNT << 16))
+        )
+        self.assertFalse(self._collect(self._memory(40), patch.marker_descriptor_word(0)))
+        self.assertFalse(self._collect(self._memory(5), 0x0000_0B01))
+        # Nothing was written anywhere in the journal, old address included.
+        for offset in range(patch.PERSISTENT_TOWER_MASK_BYTES):
+            self.assertEqual(memory.read8(self.JOURNAL + offset), 0)
+        self.assertEqual(memory.read32(0x8001_5FD0), 0)
+
+
+class CarrierStubTests(unittest.TestCase):
+    """The monster carrier: the third check rides a forced level-1 spawn.
+
+    Four stubs in the seed page (docs/game/monster-ai.md). The two with logic
+    worth simulating are the claim - which hands the carrier the slot-2 marker
+    unless that floor's third check is already journaled - and the forced
+    spawn, which must leave floor 40 alone.
+    """
+
+    FLOOR_ADDRESS = 0x8008_146C
+    JOURNAL = patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_LOCATION_MASK_OFFSET
+
+    def _memory(self, floor: int, claiming: int) -> mips_sim.Memory:
+        placements = [
+            patch.LocationPlacement("Gold", "Koh", False)
+            for _ in range(patch.LOCATION_COUNT)
+        ]
+        block = patch.build_seed_block(b"12345678", placements)
+        memory = mips_sim.Memory()
+        memory.load_bytes(patch.SEED_BLOCK_ADDRESS, bytes(block))
+        memory.write32(self.FLOOR_ADDRESS, floor)
+        memory.write32(
+            patch.CARRIER_STATE_ADDRESS + patch.CARRIER_CLAIMING_STATE_OFFSET, claiming
+        )
+        return memory
+
+    ACTOR = 0x800E_4800
+    STACK = 0x801F_C000
+
+    def _claim(self, memory: mips_sim.Memory, unit: int = 0x800E_4000) -> tuple[int, list]:
+        """Run the claim on `unit`; returns (v0, calls) where calls records
+        the real roll and clear_timed_effect(unit, effect) invocations."""
+
+        calls: list = []
+        # The unit's actor pointer at unit-0x14 and its talent word.
+        memory.write32(unit - 0x14, self.ACTOR)
+        if memory.read32(unit + patch.UNIT_TALENTS_OFFSET) == 0:
+            memory.write32(unit + patch.UNIT_TALENTS_OFFSET, 0x0000_0101)
+
+        def real_roll(cpu: mips_sim.Cpu) -> None:
+            calls.append("real roll")
+            cpu.registers[2] = 0x7777_7777
+
+        def clear_effect(cpu: mips_sim.Cpu) -> None:
+            calls.append(("clear", cpu.registers[4], cpu.registers[5]))
+            # A real callee clobbers the caller-saved set.
+            for register in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25):
+                cpu.registers[register] = 0xDEAD_BEEF
+
+        cpu = mips_sim.Cpu(
+            memory,
+            {
+                patch.ROLL_CARRIED_ITEM_ADDRESS: real_roll,
+                patch.CLEAR_TIMED_EFFECT_ADDRESS: clear_effect,
+            },
+        )
+        cpu.registers[4] = unit
+        result = cpu.run(patch.CARRIER_ROLL_STUB_ADDRESS, stack_pointer=self.STACK)
+        self.assertEqual(cpu.registers[29], self.STACK, "the claim left the stack unbalanced")
+        return result, calls
+
+    def test_the_stub_sizes_are_what_the_layout_reserves(self) -> None:
+        stubs = patch._build_carrier_stubs()
+        self.assertEqual(
+            len(stubs),
+            patch.CARRIER_CLAIM_STUB_SIZE + patch.CARRIER_AI_STUB_SIZE + patch.CARRIER_DRAW_STUB_SIZE,
+        )
+        self.assertLessEqual(
+            patch.CARRIER_SPECIES_TABLE_OFFSET + patch.CARRIER_SPECIES_TABLE_FLOORS,
+            patch.FLOOR_PAGE_WINDOW_END,
+        )
+        forced = patch._build_carrier_forced_spawn()
+        self.assertLessEqual(
+            patch.CARRIER_FORCED_STUB_OFFSET + len(forced), patch.CARRIER_UNRESTRICTED_END
+        )
+
+    def test_the_carried_item_is_the_floors_third_marker(self) -> None:
+        self.assertEqual(
+            patch.CARRIER_ITEM_DESCRIPTOR,
+            patch.marker_descriptor_word(patch.MARKER_CARRIER_SLOT),
+        )
+        self.assertEqual(
+            patch.CARRIER_ITEM_DESCRIPTOR.to_bytes(4, "little"),
+            bytes([patch.MARKER_ID, patch.MARKER_CATEGORY, patch.MARKER_CARRIER_SLOT, patch.MARKER_STATUS]),
+        )
+
+    def test_a_claiming_spawn_gets_the_marker_and_is_recorded(self) -> None:
+        for floor in (1, 17, 39):
+            with self.subTest(floor=floor):
+                memory = self._memory(floor, claiming=1)
+                result, calls = self._claim(memory, unit=0x800E_4B00)
+                self.assertEqual(result, patch.CARRIER_ITEM_DESCRIPTOR)
+                # Woken (the constructor rolls a 50% sleep the claim cannot
+                # prevent), and never handed to the real roll.
+                self.assertEqual(calls, [("clear", 0x800E_4B00, patch.SLEEP_EFFECT_ID)])
+                self.assertEqual(memory.read32(patch.CARRIER_STATE_ADDRESS), 0x800E_4B00)
+                # Sleep-proof against thrown sleep, other talents kept.
+                self.assertEqual(
+                    memory.read32(0x800E_4B00 + patch.UNIT_TALENTS_OFFSET),
+                    0x0000_0101 | patch.TALENT_SLEEP_PROOF,
+                )
+                # And the one-shot palette stamp on the actor.
+                self.assertEqual(memory.read16(self.ACTOR + 0x12), patch.CARRIER_PALETTE)
+
+    def test_the_palette_is_a_per_seed_choice_among_the_species_form_groups(self) -> None:
+        # A species' CLUT row is four groups of four (wild + three element
+        # forms); only sub-slots 0 and 1 of a group are populated on every
+        # species, and a cell's own CLUT may already sit on sub-slot 1, so the
+        # only deltas that never land a frame on an all-zero (transparent)
+        # palette are the group strides. Delta +2 made the floor-3 Unicorn
+        # invisible (`invisible_carrier.sav`, 2026-08-15).
+        self.assertEqual(patch.CARRIER_PALETTE_CHOICES, (4, 8, 12))
+        self.assertTrue(all(choice % 4 == 0 for choice in patch.CARRIER_PALETTE_CHOICES))
+        self.assertIn(patch.CARRIER_PALETTE, patch.CARRIER_PALETTE_CHOICES)
+        for palette in patch.CARRIER_PALETTE_CHOICES:
+            placements = [
+                patch.LocationPlacement("Gold", "Koh", False)
+                for _ in range(patch.LOCATION_COUNT)
+            ]
+            block = patch.build_seed_block(b"12345678", placements, carrier_palette=palette)
+            claim = bytes(block[patch.CARRIER_CODE_OFFSET : patch.CARRIER_CODE_OFFSET + patch.CARRIER_CLAIM_STUB_SIZE])
+            self.assertIn(struct.pack("<I", patch._i(0x09, 0, 12, palette)), claim)
+            memory = mips_sim.Memory()
+            memory.load_bytes(patch.SEED_BLOCK_ADDRESS, bytes(block))
+            memory.write32(patch.CARRIER_STATE_ADDRESS + patch.CARRIER_CLAIMING_STATE_OFFSET, 1)
+            memory.write32(self.FLOOR_ADDRESS, 3)
+            self._claim(memory)
+            self.assertEqual(memory.read16(self.ACTOR + 0x12), palette)
+
+    def _dispatch(self, memory: mips_sim.Memory, unit: int) -> int:
+        """Run the AI dispatch on `unit`; returns the species it resumed with."""
+
+        resumed: list[int] = []
+
+        def resume(cpu: mips_sim.Cpu) -> None:
+            resumed.append(cpu.registers[2])
+            cpu.registers[31] = 0xDEAD_0000
+
+        cpu = mips_sim.Cpu(memory, {patch.AI_DISPATCH_RESUME_ADDRESS: resume})
+        cpu.registers[21] = unit
+        cpu.run(patch.CARRIER_AI_STUB_ADDRESS)
+        self.assertEqual(len(resumed), 1, hex(unit))
+        return resumed[0]
+
+    def test_the_ai_dispatch_forces_picket_on_whoever_holds_the_marker(self) -> None:
+        # The dispatch runs on every think, so it must answer "is this unit a
+        # carrier NOW" from the unit itself. It used to compare the unit
+        # pointer with the one the claim recorded, and that pointer outlived
+        # the carrier: units are LIFO actor-pool slots, so the next monster
+        # spawned after the carrier died landed on the same address and ran
+        # Picket's handler empty-handed - 50/50, then its own ability at Koh
+        # (the floor-4 Baloon casting Fly, 2026-08-17; monster-ai.md §2d).
+        memory = self._memory(5, claiming=0)
+        carrier, phantom, reused, stripped, other = (
+            0x800E_4B00, 0x800E_4C00, 0x800E_4D00, 0x800E_4E00, 0x800E_4F00,
+        )
+        for unit, species in (
+            (carrier, 0x17), (phantom, 0x0E), (reused, 0x19), (stripped, 0x16), (other, 0x1B)
+        ):
+            memory.write8(unit + 0x13, species)
+        # The real carrier holds the slot-2 marker. A unit holding the marker
+        # with the equipped bit (the 2026-08-15..17 banked phantom, or a
+        # mid-tower state from that build) is still a carrier: id/category
+        # only.
+        memory.write32(carrier + patch.UNIT_CARRIED_ITEM_OFFSET, patch.CARRIER_ITEM_DESCRIPTOR)
+        memory.write32(
+            phantom + patch.UNIT_CARRIED_ITEM_OFFSET,
+            patch.CARRIER_ITEM_DESCRIPTOR | patch.DESCRIPTOR_EQUIPPED_BIT,
+        )
+        # A Baloon spawned into the dead carrier's slot: the stale pointer
+        # still names it, but it holds nothing.
+        memory.write32(patch.CARRIER_STATE_ADDRESS, reused)
+        memory.write32(reused + patch.UNIT_CARRIED_ITEM_OFFSET, 0)
+        # A Troll that swapped its marker for a thrown weapon (category 0x08).
+        memory.write32(stripped + patch.UNIT_CARRIED_ITEM_OFFSET, 0x2000_0803)
+        # And an ordinary monster holding a Healing Herb (category 0x03).
+        memory.write32(other + patch.UNIT_CARRIED_ITEM_OFFSET, 0x0000_0301)
+        self.assertEqual(self._dispatch(memory, carrier), 0x20)
+        self.assertEqual(self._dispatch(memory, phantom), 0x20)
+        self.assertEqual(self._dispatch(memory, reused), 0x19, "the stale-pointer phantom")
+        self.assertEqual(self._dispatch(memory, stripped), 0x16)
+        self.assertEqual(self._dispatch(memory, other), 0x1B)
+        dispatch = patch._build_carrier_stubs()[patch.CARRIER_CLAIM_STUB_SIZE:][: patch.CARRIER_AI_STUB_SIZE]
+        # No palette write anywhere in the dispatch any more ...
+        self.assertNotIn(struct.pack("<I", patch._i(0x29, 10, 9, 0x0012)), dispatch)
+        # ... and no read of the carrier pointer either.
+        self.assertNotIn(
+            struct.pack("<I", patch._i(0x0F, 0, 8, patch._upper(patch.CARRIER_STATE_ADDRESS))),
+            dispatch,
+        )
+
+    def test_the_held_marker_test_is_id_and_category_only(self) -> None:
+        # Recorded conflict: this is the GIFT category. A Viper retargeted
+        # from eggs (0x12) to 0x0B would pass it - widen the test first.
+        self.assertEqual(patch.CARRIER_HELD_MARKER_HALFWORD, 0x0B01)
+        self.assertEqual(patch.MARKER_CATEGORY, 0x0B)
+        self.assertEqual(patch.UNIT_CARRIED_ITEM_OFFSET, 0x48)
+
+    def test_a_banked_third_check_spawns_the_carrier_empty_handed(self) -> None:
+        # Nothing in hand, not a phantom: the 2026-08-15..17 build handed it
+        # the marker with the equipped bit so the overlay death drop would
+        # skip it, but Picket's and Viper's OWN death routines return what
+        # they hold regardless of that bit, and a floor-22 Picket carrier
+        # dropped the phantom - the collect hook rejected 0xAD, so it entered
+        # the inventory as an equipped-flagged Cream that crashed the game
+        # when thrown (`Creamcrash.sav`, 2026-08-17). With nothing in +0x48
+        # the unit is not a carrier to the dispatch either: it runs its own
+        # species AI, a plain level-1 monster.
+        memory = self._memory(17, claiming=1)
+        memory.write8(self.JOURNAL + 16, 1 << patch.MARKER_CARRIER_SLOT)
+        result, calls = self._claim(memory)
+        self.assertEqual(result, 0)
+        # Still woken, still no real roll - only the item is withheld.
+        self.assertEqual(calls, [("clear", 0x800E_4000, patch.SLEEP_EFFECT_ID)])
+        # Still recorded (debug state; nothing reads it).
+        self.assertEqual(memory.read32(patch.CARRIER_STATE_ADDRESS), 0x800E_4000)
+        # And an empty hand is not a carrier to the AI dispatch.
+        memory.write32(0x800E_4000 + patch.UNIT_CARRIED_ITEM_OFFSET, result)
+        memory.write8(0x800E_4000 + 0x13, 0x20)
+        self.assertEqual(self._dispatch(memory, 0x800E_4000), 0x20)   # a Picket stays a Picket
+        memory.write8(0x800E_4000 + 0x13, 0x24)
+        self.assertEqual(self._dispatch(memory, 0x800E_4000), 0x24)   # a Viper stays a Viper
+        # Only the carrier's own bit gates it: the ground slots do not.
+        memory = self._memory(17, claiming=1)
+        memory.write8(self.JOURNAL + 16, 0b011)
+        self.assertEqual(self._claim(memory)[0], patch.CARRIER_ITEM_DESCRIPTOR)
+        # And only this floor's byte.
+        memory = self._memory(17, claiming=1)
+        memory.write8(self.JOURNAL + 15, 0xFF)
+        memory.write8(self.JOURNAL + 17, 0xFF)
+        self.assertEqual(self._claim(memory)[0], patch.CARRIER_ITEM_DESCRIPTOR)
+
+    def test_an_ordinary_monster_gets_the_real_roll(self) -> None:
+        memory = self._memory(17, claiming=0)
+        result, calls = self._claim(memory)
+        self.assertEqual(calls, ["real roll"])
+        self.assertEqual(result, 0x7777_7777)
+        self.assertEqual(memory.read32(patch.CARRIER_STATE_ADDRESS), 0)
+
+    def _force(self, memory: mips_sim.Memory) -> list[tuple[str, int]]:
+        calls: list[tuple[str, int]] = []
+        table = 0x800E_5000
+        memory.write32(patch.MONSTER_TABLE_POINTER_ADDRESS, table)
+        memory.write32(table + patch.CARRIER_SLOT_BYTE_OFFSET, 0x0000_BEEF)
+
+        def spawn(cpu: mips_sim.Cpu) -> None:
+            calls.append(("spawn", cpu.registers[4]))
+            calls.append(("slot 15 during spawn", cpu.memory.read16(table + patch.CARRIER_SLOT_BYTE_OFFSET)))
+            calls.append(("claiming during spawn", cpu.memory.read32(
+                patch.CARRIER_STATE_ADDRESS + patch.CARRIER_CLAIMING_STATE_OFFSET)))
+
+        def random_range(cpu: mips_sim.Cpu) -> None:
+            calls.append(("random_range", cpu.registers[4] * 100 + cpu.registers[5]))
+
+        mips_sim.Cpu(
+            memory,
+            {patch.SPAWN_MONSTER_ADDRESS: spawn, patch.RANDOM_RANGE_ADDRESS: random_range},
+        ).run(patch.CARRIER_FORCED_STUB_ADDRESS)
+        calls.append(("slot 15 after", memory.read16(table + patch.CARRIER_SLOT_BYTE_OFFSET)))
+        calls.append(("claiming after", memory.read32(
+            patch.CARRIER_STATE_ADDRESS + patch.CARRIER_CLAIMING_STATE_OFFSET)))
+        return calls
+
+    def test_the_forced_spawn_borrows_slot_fifteen_for_one_spawn(self) -> None:
+        memory = self._memory(12, claiming=0)
+        # The species table is the world's to fill (monster_spawns.place_carrier_table).
+        memory.load_bytes(patch.CARRIER_SPECIES_TABLE_ADDRESS, bytes(range(0x20, 0x20 + 39)))
+        species = 0x20 + 11
+        self.assertEqual(
+            self._force(memory),
+            [
+                ("spawn", patch.CARRIER_SPAWN_ARG),
+                ("slot 15 during spawn", species | (patch.CARRIER_LEVEL << 8)),
+                ("claiming during spawn", 1),
+                ("random_range", 408),
+                ("slot 15 after", 0xBEEF),
+                ("claiming after", 0),
+            ],
+        )
+
+    def test_the_forced_spawn_leaves_floor_forty_alone(self) -> None:
+        memory = self._memory(40, claiming=0)
+        self.assertEqual(
+            self._force(memory),
+            [("random_range", 408), ("slot 15 after", 0xBEEF), ("claiming after", 0)],
+        )
 
 
 if __name__ == "__main__":

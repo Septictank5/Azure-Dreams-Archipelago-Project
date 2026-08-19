@@ -75,7 +75,7 @@ def _guarded_locations(world: AzureDreamsWorld) -> list[Location]:
     result += [
         world.get_location(locations.tower_location_name(floor, slot))
         for floor in range(1, locations.TOWER_FLOOR_COUNT + 1)
-        for slot in range(locations.TOWER_SLOTS_PER_FLOOR)
+        for slot in range(locations.tower_slots_for(world))
     ]
     return result
 

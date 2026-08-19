@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from BaseClasses import Item, ItemClassification
 
-from . import item_manifest
+from . import item_manifest, locations
 
 if TYPE_CHECKING:
     from .world import AzureDreamsWorld
@@ -35,6 +35,19 @@ GOLD_PACKAGE_AMOUNT = 5_000
 # banked count (patch.SEND_TOKEN_BANKED_ADDRESS) because the count is
 # cumulative and spent in game.
 SEND_TOKEN = "Send Token"
+# The blacksmith's progressive unlocks (docs/systems/blacksmith.md): three Red
+# Sands (weapon temper level 1..3 -> +10/+20/+40) and three Blue Sands (shield
+# temper level) - and the ball charger's (docs/systems/fortune-teller.md
+# section 5): three White Sands (1/2/3 charges per town visit). Native item
+# names and
+# protocol ids, so every client already decodes them - but they never enter the
+# bag: the client applies the count in the received history straight to the
+# level bytes, the way keycards set the clearance level, and they cut the
+# delivery line like keycards do.
+RED_SAND = item_manifest.RED_SAND_NAME
+BLUE_SAND = item_manifest.BLUE_SAND_NAME
+WHITE_SAND = item_manifest.WHITE_SAND_NAME
+TEMPER_SAND_COUNT = 3
 VICTORY = "Victory"
 
 # Trap items (own-world only, tower only, disguised in-game as Progressive
@@ -130,7 +143,23 @@ ITEM_CLASSIFICATIONS = {
         reward.name: ItemClassification.filler
         for reward in item_manifest.NATIVE_REWARDS
     },
+    # Power, not logic: nothing is reachable only by tempering. Useful rather
+    # than progression so they never gate the fill, and useful rather than
+    # filler so they are placed with some care (six items, so the excluded-
+    # location refusal that ruled useful out for the flat pool is no risk).
+    RED_SAND: ItemClassification.useful,
+    BLUE_SAND: ItemClassification.useful,
+    WHITE_SAND: ItemClassification.useful,
 }
+
+def carrier_reward_loss(world: AzureDreamsWorld) -> int:
+    """Rewards the pool does not need because the carrier check is switched off:
+    one per tower floor that has checks."""
+
+    if world.options.carrier_system:
+        return 0
+    return locations.TOWER_FLOOR_COUNT
+
 
 PROGRESSIVE_KEYCARD_COUNT = 8
 # Five guaranteed packages, replacing five native rewards; the 98 locations
@@ -189,7 +218,10 @@ def create_event_item(world: AzureDreamsWorld, name: str) -> AzureDreamsItem:
 
 def create_all_items(world: AzureDreamsWorld) -> None:
     unfilled_location_count = len(world.multiworld.get_unfilled_locations(world.player))
-    expected_location_count = PROGRESSIVE_KEYCARD_COUNT + item_manifest.REWARD_COUNT
+    # With the carrier system off there is one fewer check on every tower floor,
+    # so the pool loses exactly that many draws - see `carrier_reward_loss`.
+    reward_count = item_manifest.REWARD_COUNT - carrier_reward_loss(world)
+    expected_location_count = PROGRESSIVE_KEYCARD_COUNT + reward_count
     if unfilled_location_count != expected_location_count:
         raise ValueError(
             f"Azure Dreams has {unfilled_location_count} locations but its configured pool "
@@ -202,6 +234,14 @@ def create_all_items(world: AzureDreamsWorld) -> None:
     )
     tokens = send_token_count(world)
     itempool.extend(world.create_item(SEND_TOKEN) for _ in range(tokens))
+    # The smith's six unlocks and the ball charger's three, fixed; each
+    # displaces a native draw below. With the temper system off there are no
+    # NPCs to unlock, so no sands at all - the draws below take their places
+    # (the sands stay out of the random draws either way).
+    sand_count = TEMPER_SAND_COUNT if world.options.temper_system else 0
+    itempool.extend(world.create_item(RED_SAND) for _ in range(sand_count))
+    itempool.extend(world.create_item(BLUE_SAND) for _ in range(sand_count))
+    itempool.extend(world.create_item(WHITE_SAND) for _ in range(sand_count))
 
     # The Monster Shop's ten slots are rolled HERE, not in post_fill, and the
     # items they ask for are drawn into the pool alongside everything else. The
@@ -225,7 +265,11 @@ def create_all_items(world: AzureDreamsWorld) -> None:
     # above each displace one native draw so the pool still matches the
     # location count exactly.
     elsewhere_count = (
-        item_manifest.REWARD_COUNT - len(selected) - GOLD_PACKAGE_COUNT - tokens
+        reward_count
+        - len(selected)
+        - GOLD_PACKAGE_COUNT
+        - tokens
+        - 3 * sand_count
     )
 
     # Traps displace ordinary draws, one independent trap-chance roll per

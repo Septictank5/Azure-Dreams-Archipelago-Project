@@ -860,8 +860,14 @@ class TestIntroState(unittest.TestCase):
 
     def test_flag_masks_encode_the_measured_flag_ids(self) -> None:
         # v113: entrance removal only - the tutorial flag set is retired
-        # (played v112: it did not remove the tutorial).
+        # (played v112: it did not remove the tutorial). The pool-house
+        # TESTING flags ride the same table while pool_house.POOL_HOUSE_OPEN
+        # is on (test_pool_house.py pins them against the scripts).
+        from .. import pool_house
+
         expected = {0xDAB, 0xDAC}
+        if pool_house.POOL_HOUSE_OPEN:
+            expected |= set(town_shop.POOL_HOUSE_QUEST_DONE_FLAGS)
         got = set()
         for address, mask in town_shop.INTRO_STATE_WRITES:
             if address < town_shop.STORY_FLAG_ARRAY_ADDRESS:
@@ -939,35 +945,51 @@ class TestSendMenuUiGates(unittest.TestCase):
             "the vanilla header string moved",
         )
 
-    def _run_price_gate(self, active_shop: int) -> int:
+    def _run_smith_price_gate(self, active_shop: int) -> int:
         memory = mips_sim.Memory()
         memory.load_bytes(
-            town_shop.PRICE_VISIBILITY_GATE_ADDRESS,
-            town_shop._build_price_visibility_gate(),
+            town_shop.SMITH_PRICE_GATE_ADDRESS,
+            town_shop._build_smith_price_gate(),
         )
-        # A stand-in vanilla test that returns 0x77, so a fall-through is
-        # distinguishable from the gate's own zero.
+        # Stand-ins: the vanilla buy price answers 0x77, the smith's price
+        # entry 0x55, so the two targets are distinguishable.
         memory.load_bytes(
-            town_shop.VANILLA_PRICE_VISIBILITY_GATE_ADDRESS,
-            struct.pack(
-                "<2I",
-                0x03E00008,  # jr ra
-                0x24020077,  # (delay) li v0,0x77
-            ),
+            town_shop.VANILLA_BUY_PRICE_ADDRESS,
+            struct.pack("<2I", 0x03E00008, 0x24020077),
+        )
+        memory.load_bytes(
+            town_shop.SMITH_PRICE_ENTRY_ADDRESS,
+            struct.pack("<2I", 0x03E00008, 0x24020055),
         )
         memory.write8(
             town_shop.SHOP_CORE_ADDRESS + town_shop.ACTIVE_SHOP_OFFSET,
             active_shop,
         )
         cpu = mips_sim.Cpu(memory)
-        return cpu.run(town_shop.PRICE_VISIBILITY_GATE_ADDRESS)
+        cpu.registers[25] = town_shop.SHOP_CORE_ADDRESS  # t9, as the resolver leaves it
+        return cpu.run(town_shop.SMITH_PRICE_GATE_ADDRESS)
 
-    def test_price_gate_hides_send_menu_prices_only(self) -> None:
-        self.assertEqual(
-            self._run_price_gate(town_shop.SEND_MENU_SHOP_MARKER), 0
+    def test_smith_price_gate_routes_only_the_smith_menu(self) -> None:
+        self.assertEqual(self._run_smith_price_gate(town_shop.SMITH_MENU_SHOP_MARKER), 0x55)
+        self.assertEqual(self._run_smith_price_gate(town_shop.SEND_MENU_SHOP_MARKER), 0x77)
+        self.assertEqual(self._run_smith_price_gate(0), 0x77)
+        self.assertEqual(self._run_smith_price_gate(0xFF), 0x77)
+
+    def test_price_resolver_falls_back_through_the_smith_price_gate(self) -> None:
+        resolver = town_shop._build_buy_price_resolver()
+        words = struct.unpack(f"<{len(resolver) // 4}I", resolver)
+        self.assertEqual(words[-2], town_shop._j(0x02, town_shop.SMITH_PRICE_GATE_ADDRESS))
+        self.assertNotIn(town_shop._j(0x02, town_shop.VANILLA_BUY_PRICE_ADDRESS), words)
+
+    def test_retired_price_visibility_hook_is_written_back_to_vanilla(self) -> None:
+        patches = dict(town_shop.iter_town_shop_hook_file_patches())
+        offset = town_shop.town_runtime_to_file_offset(
+            town_shop.GENERIC_PRICE_VISIBILITY_HOOK_ADDRESS
         )
-        self.assertEqual(self._run_price_gate(0), 0x77)
-        self.assertEqual(self._run_price_gate(1), 0x77)
+        self.assertEqual(
+            struct.unpack("<I", patches[offset])[0],
+            town_shop._j(0x03, town_shop.VANILLA_PRICE_VISIBILITY_GATE_ADDRESS),
+        )
 
     def _run_tag_gate(self, active_shop: int) -> tuple[int, int]:
         memory = mips_sim.Memory()
@@ -1003,10 +1025,15 @@ class TestSendMenuUiGates(unittest.TestCase):
             town_shop.CHECK_CAPACITY_GATE_ADDRESS,
             town_shop._build_check_capacity_gate(),
         )
-        # A stand-in vanilla guard that reports a distinctive refusal.
+        # A stand-in vanilla guard that reports a distinctive refusal, and a
+        # stand-in smith guard entry that reports 0x55.
         memory.load_bytes(
             town_shop.VANILLA_CHECK_CAPACITY_GUARD_ADDRESS,
             struct.pack("<2I", 0x03E00008, 0x24020077),  # jr ra / li v0,0x77
+        )
+        memory.load_bytes(
+            town_shop.SMITH_GUARD_ENTRY_ADDRESS,
+            struct.pack("<2I", 0x03E00008, 0x24020055),  # jr ra / li v0,0x55
         )
         memory.write8(
             town_shop.SHOP_CORE_ADDRESS + town_shop.ACTIVE_SHOP_OFFSET,
@@ -1015,18 +1042,20 @@ class TestSendMenuUiGates(unittest.TestCase):
         cpu = mips_sim.Cpu(memory)
         return cpu.run(town_shop.CHECK_CAPACITY_GATE_ADDRESS)
 
-    def test_capacity_gate_lifts_the_bag_limit_for_sends_only(self) -> None:
-        """A send removes items, so the vanilla buy rule - checked rows plus
-        occupied slots under twenty - must never refuse a send-menu check;
-        it inverted into "a nineteen-item bag can send exactly one item per
-        conversation". Real shops (and vanilla menus, ACTIVE_SHOP 0xFF) keep
-        the vanilla guard byte for byte."""
+    def test_capacity_gate_hands_the_smith_menu_its_purchase(self) -> None:
+        """The A press on the blacksmith's menu is a purchase: the guard call
+        is handed to the smith's guard entry while ACTIVE_SHOP is his marker.
+        Real shops, vanilla menus (0xFF) and the retired send marker keep the
+        vanilla guard byte for byte (2026-08-16: the send marker no longer
+        lifts the bag limit - nothing sets it)."""
 
         self.assertEqual(
-            self._run_capacity_gate(town_shop.SEND_MENU_SHOP_MARKER), 1
+            self._run_capacity_gate(town_shop.SMITH_MENU_SHOP_MARKER), 0x55
         )
+        self.assertEqual(self._run_capacity_gate(town_shop.SEND_MENU_SHOP_MARKER), 0x77)
         self.assertEqual(self._run_capacity_gate(0), 0x77)
         self.assertEqual(self._run_capacity_gate(1), 0x77)
+        self.assertEqual(self._run_capacity_gate(0xFF), 0x77)
         self.assertEqual(self._run_capacity_gate(0xFF), 0x77)
 
     def test_capacity_hook_site_matches_the_disc(self) -> None:

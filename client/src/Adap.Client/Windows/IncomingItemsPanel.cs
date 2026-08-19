@@ -266,6 +266,10 @@ internal sealed class IncomingItemsPanel : Panel
         if (!occupied)
             return;
 
+        // Not drained with the tower and the shops: an item in this queue is
+        // a fact the SERVER stated, and it is just as true before the game is
+        // attached. The two panels beside it are drawing the game's own state,
+        // which is what the client may not know yet.
         Image? icon = AzureDreamsItemCatalog.TryGetIcon(_items[slot].ItemId);
         if (icon is not null)
             g.DrawImage(icon, cell);

@@ -19,9 +19,10 @@ class TestAzureDreamsWorld(AzureDreamsTestBase):
             len(regular_locations),
             locations.TOWER_LOCATION_COUNT + locations.SHOP_LOCATION_COUNT,
         )
-        self.assertEqual(locations.TOWER_LOCATION_COUNT, 78)
+        self.assertEqual(locations.TOWER_SLOTS_PER_FLOOR, 3)
+        self.assertEqual(locations.TOWER_LOCATION_COUNT, 117)
         self.assertEqual(locations.SHOP_LOCATION_COUNT, 20)
-        self.assertEqual(len(self.multiworld.itempool), 98)
+        self.assertEqual(len(self.multiworld.itempool), 137)
         self.assertEqual(len(self.get_items_by_name(items.PROGRESSIVE_KEYCARD)), 8)
         self.assertTrue(all(item.advancement for item in self.get_items_by_name(items.PROGRESSIVE_KEYCARD)))
         gold = self.get_items_by_name(items.GOLD_PACKAGE)
@@ -216,16 +217,24 @@ class TestAzureDreamsWorld(AzureDreamsTestBase):
         # above anything else, so every reward is filler (and every trap is a
         # trap - the classification AP's fill and other players' trap-fill
         # settings understand). Marking rewards useful instead would make
-        # `exclude_locations` unfillable.
+        # `exclude_locations` unfillable. The three sands are the one
+        # exception - nine fixed useful items, power not logic.
         self.assertEqual(
             {
                 classification
                 for name, classification in items.ITEM_CLASSIFICATIONS.items()
                 if name != items.PROGRESSIVE_KEYCARD
                 and not items.is_trap_name(name)
+                and name not in (items.RED_SAND, items.BLUE_SAND, items.WHITE_SAND)
             },
             {ItemClassification.filler},
         )
+        self.assertEqual(items.ITEM_CLASSIFICATIONS[items.RED_SAND], ItemClassification.useful)
+        self.assertEqual(items.ITEM_CLASSIFICATIONS[items.BLUE_SAND], ItemClassification.useful)
+        self.assertEqual(items.ITEM_CLASSIFICATIONS[items.WHITE_SAND], ItemClassification.useful)
+        # and they are out of every random draw
+        self.assertNotIn(items.RED_SAND, {r.name for r in item_manifest.ORDINARY_REWARDS})
+        self.assertNotIn(items.BLUE_SAND, {r.name for r in item_manifest.ORDINARY_REWARDS})
         self.assertEqual(
             {
                 classification
@@ -263,7 +272,14 @@ class TestAzureDreamsWorld(AzureDreamsTestBase):
     def test_location_ids_match_mailbox_bits(self) -> None:
         self.assertEqual(locations.tower_location_id(1, 0), locations.LOCATION_ID_BASE)
         self.assertEqual(locations.tower_location_id(1, 1), locations.LOCATION_ID_BASE + 1)
-        self.assertEqual(locations.tower_location_id(39, 1), locations.LOCATION_ID_BASE + 77)
+        self.assertEqual(locations.tower_location_id(1, 2), locations.LOCATION_ID_BASE + 2)
+        self.assertEqual(locations.tower_location_id(39, 2), locations.LOCATION_ID_BASE + 116)
+        # The tower half of the unified mask holds 128 bits, so 117 tower ids
+        # still land clear of the shop base at +0x100.
+        self.assertLess(
+            locations.tower_location_id(39, locations.TOWER_SLOTS_PER_FLOOR - 1),
+            locations.SHOP_LOCATION_ID_BASE,
+        )
         self.assertEqual(locations.shop_location_id(0), locations.SHOP_LOCATION_ID_BASE)
         self.assertEqual(locations.shop_location_id(9), locations.SHOP_LOCATION_ID_BASE + 9)
         self.assertEqual(locations.shop_location_id(10), locations.SHOP_LOCATION_ID_BASE + 10)
@@ -308,7 +324,7 @@ class TestAzureDreamsWorld(AzureDreamsTestBase):
 
     def test_slot_data_advertises_town_receive_protocol_generation(self) -> None:
         slot_data = self.world.fill_slot_data()
-        self.assertEqual(slot_data["apworld_version"], 16)
+        self.assertEqual(slot_data["apworld_version"], 19)
         self.assertEqual(
             slot_data["shop_location_id_base"],
             locations.SHOP_LOCATION_ID_BASE,
@@ -319,7 +335,9 @@ class TestAzureDreamsWorld(AzureDreamsTestBase):
         )
         self.assertEqual(
             slot_data["persistent_shop_mask_address"],
-            0x8001_5FE4,
+            # Derived: ADSV moved when the journal grew, and a literal here just
+            # re-reports the move as a regression.
+            patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_SHOP_MASK_OFFSET,
         )
 
     def test_progressive_floor_gates(self) -> None:
@@ -414,13 +432,15 @@ class TestFloorKeycardOwnership(unittest.TestCase):
     def test_a_foreign_keycard_leaves_its_floor_unmarked(self) -> None:
         """The bit the elevator actually reads, end of the chain."""
 
-        # Placement index 6 is floor 4, slot 1 - so bit 3 of the first mask byte.
-        floor_four = 0b1000
+        # The keycard mask is per FLOOR: placement index 6 lands on floor
+        # `6 // slots + 1`, so its bit is `6 // slots` of the first mask byte.
+        # Derived, because the slots-per-floor count moved once already.
+        floor_bit = 1 << (6 // patch.MARKER_SLOT_COUNT)
 
         def mask_for(owner: AzureDreamsWorld, recipient: str) -> int:
             keycard = owner.create_item(items.PROGRESSIVE_KEYCARD)
             placements = [
-                patch.LocationPlacement("Gold", "Tester1", False) for _ in range(78)
+                patch.LocationPlacement("Gold", "Tester1", False) for _ in range(patch.LOCATION_COUNT)
             ]
             placements[6] = patch.LocationPlacement(
                 keycard.name,
@@ -429,7 +449,7 @@ class TestFloorKeycardOwnership(unittest.TestCase):
                 progressive_keycard=self.mine._is_own_keycard(keycard),
             )
             block = patch.build_seed_block(b"12345678", placements)
-            return block[patch.FLOOR_KEYCARD_MASK_OFFSET] & 0b1111
+            return block[patch.FLOOR_KEYCARD_MASK_OFFSET]
 
         self.assertEqual(mask_for(self.theirs, "Tester2"), 0)
-        self.assertEqual(mask_for(self.mine, "Tester1"), floor_four)
+        self.assertEqual(mask_for(self.mine, "Tester1"), floor_bit)

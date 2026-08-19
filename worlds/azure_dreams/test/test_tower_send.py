@@ -71,6 +71,36 @@ class TowerSendLayoutTests(unittest.TestCase):
         # finishes for OUR row; leaving it on slot 6 froze the label mid-slide.
         self.assertEqual(tower_send._FADE_DONE_TEST_WORD, 0x8C42001C)
 
+    def test_both_routes_to_the_table_addiu_get_the_relocated_upper_half(
+        self,
+    ) -> None:
+        # REGRESSION, 2026-08-18. FUN_8004FF20 feeds the addiu at 0x8004FF78
+        # from TWO `lui v0,0x8007` instructions: the fall-through copy at
+        # 0x8004FF70 and the branch-delay copy at 0x8004FF5C, taken when the
+        # players menu is paged to a familiar and the row is Line up / Fuse /
+        # Command. Patching only the first left the second computing
+        # 0x80068D60 and `jalr`ing garbage - a hard crash, reproduced in play.
+        # Every `lui` that can reach the addiu must carry the relocated half.
+        patches = dict(tower_send.iter_tower_send_file_patches(["Other"]))
+        for address in (
+            tower_send.TABLE_LUI_ADDRESS,
+            tower_send.TABLE_LUI_DELAY_SLOT_ADDRESS,
+        ):
+            offset = save_removal.slus_runtime_to_file_offset(address)
+            self.assertIn(offset, patches)
+            self.assertEqual(
+                patches[offset], struct.pack("<I", tower_send._TABLE_LUI_WORD)
+            )
+        # The two lui sites must be distinct, and the delay-slot one must sit
+        # in the branch shadow immediately before the skipped fall-through.
+        self.assertLess(
+            tower_send.TABLE_LUI_DELAY_SLOT_ADDRESS,
+            tower_send.TABLE_LUI_ADDRESS,
+        )
+        self.assertLess(
+            tower_send.TABLE_LUI_ADDRESS, tower_send.TABLE_ADDIU_ADDRESS
+        )
+
     def test_assigner_stub_shape(self) -> None:
         stub = patch.build_send_row_assigner_stub()
         words = struct.unpack(f"<{len(stub)//4}I", stub)
@@ -312,18 +342,20 @@ class TowerSendPatchRecordTests(unittest.TestCase):
     def test_all_placements_emit(self) -> None:
         records = self._records()
         # table 28 + two 16-byte stubs + record 12 + the two Feet/Hand
-        # position bytes + eleven SLUS instruction words + the two-word
-        # dungeon source-test jump + the rail's one-byte height + the
-        # eight-byte send state.
+        # position bytes + TWELVE SLUS instruction words (eleven, plus the
+        # branch-delay `lui` at 0x8004FF5C added 2026-08-18 - see
+        # test_both_routes_to_the_table_addiu_get_the_relocated_upper_half)
+        # + the two-word dungeon source-test jump + the rail's one-byte
+        # height + the eight-byte send state.
         self.assertEqual(
             sum(len(data) for data in records.values()),
-            28 + 32 + 12 + 2 + 48 + 8 + 1 + 8,
+            28 + 32 + 12 + 2 + 52 + 8 + 1 + 8,
         )
         expected_offsets = {
             file_offset
             for file_offset, _ in tower_send.iter_tower_send_file_patches(["Sandknight"])
         }
-        self.assertEqual(len(expected_offsets), 19)
+        self.assertEqual(len(expected_offsets), 20)
 
     def test_rail_grows_by_exactly_one_row(self) -> None:
         self.assertEqual(

@@ -34,7 +34,15 @@ internal sealed class TowerProgressPanel : Panel
 
     private const int RowWidth =
         FloorLabelWidth + SlotGap + MaxSlotsPerFloor * (SlotSize + SlotGap);
-    private const int ColumnWidth = MarkerGutter + RowWidth;
+    // The bell (deepest reachable floor) and the shortcut crystals are drawn
+    // AFTER the row's chests, in a gutter to the row's right. While rows held
+    // two chests they sat in the third chest's reserved space; with three
+    // chests per floor (2026-08-15) they need a gutter of their own, or the
+    // right column's markers fall off the panel edge. One slot is enough:
+    // reachable floors are 4/9/14/../39 and shortcut floors 10/20/30, so the
+    // two never share a row.
+    private const int TrailingMarkerGutter = SlotSize + SlotGap;
+    private const int ColumnWidth = MarkerGutter + RowWidth + TrailingMarkerGutter;
 
     public const int PreferredWidth =
         ContentPadding * 2 + ColumnWidth * 2 + ColumnGap;
@@ -57,6 +65,7 @@ internal sealed class TowerProgressPanel : Panel
     private AzureDreamsTowerProgress _progress = new(new byte[10], 0, 0, 0);
     private bool _hasProgress;
     private double _scale = UiScale.Natural;
+    private bool _live = true;
 
     public TowerProgressPanel()
     {
@@ -66,6 +75,20 @@ internal sealed class TowerProgressPanel : Panel
         BackColor = Color.FromArgb(15, 27, 46);
         Padding = new Padding(ContentPadding);
         MinimumSize = new Size(PreferredWidth, PreferredHeight);
+    }
+
+    /// <summary>See <see cref="PanelDimming"/>.</summary>
+    public bool Live
+    {
+        get => _live;
+        set
+        {
+            if (_live == value)
+                return;
+
+            _live = value;
+            Invalidate();
+        }
     }
 
     /// <summary>See <see cref="UiScale"/>.</summary>
@@ -172,13 +195,15 @@ internal sealed class TowerProgressPanel : Panel
         // where they are and what is left there without opening the game HUD.
         if (isCurrent && ClientAssets.KohHead is not null)
         {
-            g.DrawImage(
+            PanelDimming.DrawIcon(
+                g,
                 ClientAssets.KohHead,
                 new Rectangle(
                     bounds.Left - MarkerGutter,
                     bounds.Top + (bounds.Height - SlotSize) / 2,
                     SlotSize,
-                    SlotSize));
+                    SlotSize),
+                _live);
         }
 
         using (var text = new SolidBrush(isReachable ? ReachableFloorText : FloorText))
@@ -203,19 +228,29 @@ internal sealed class TowerProgressPanel : Panel
         if (isGoal)
         {
             // Floor 40 has no items. The medal marks the goal unconditionally.
-            DrawSlot(g, new Rectangle(slotLeft, slotTop, SlotSize, SlotSize), ClientAssets.Medal);
+            DrawSlot(g, new Rectangle(slotLeft, slotTop, SlotSize, SlotSize), ClientAssets.Medal, _live);
             slotLeft += SlotSize + SlotGap;
         }
         else
         {
+            // Always three columns wide, whatever the room placed. A room
+            // without the carrier system draws nothing in the third one, but
+            // it keeps its space: rebuilding the whole tower view's width the
+            // moment a room connects is a worse thing to look at than an empty
+            // column, and the layout stays the same across rooms.
+            int placed = _hasProgress
+                ? _progress.SlotsWithChecks
+                : AzureDreamsTowerProgress.SlotsPerFloor;
             for (int slot = 0; slot < AzureDreamsTowerProgress.SlotsPerFloor; slot++)
             {
                 // A collected slot is left empty; only what remains is drawn.
-                bool collected = _hasProgress && _progress.IsCollected(floor, slot);
+                bool collected = slot >= placed ||
+                    (_hasProgress && _progress.IsCollected(floor, slot));
                 DrawSlot(
                     g,
                     new Rectangle(slotLeft, slotTop, SlotSize, SlotSize),
-                    collected ? null : ClientAssets.Chest);
+                    collected ? null : ClientAssets.Chest,
+                    _live);
                 slotLeft += SlotSize + SlotGap;
             }
         }
@@ -225,7 +260,8 @@ internal sealed class TowerProgressPanel : Panel
             DrawSlot(
                 g,
                 new Rectangle(slotLeft, slotTop, SlotSize, SlotSize),
-                ClientAssets.Bell);
+                ClientAssets.Bell,
+                _live);
             slotLeft += SlotSize + SlotGap;
         }
 
@@ -238,11 +274,16 @@ internal sealed class TowerProgressPanel : Panel
             Image? crystal = _hasProgress && _progress.IsShortcutUnlocked(requiredLevel)
                 ? ClientAssets.Crystal
                 : ClientAssets.LockedCrystal;
-            DrawSlot(g, new Rectangle(slotLeft, slotTop, SlotSize, SlotSize), crystal);
+            DrawSlot(g, new Rectangle(slotLeft, slotTop, SlotSize, SlotSize), crystal, _live);
         }
     }
 
-    private static void DrawSlot(Graphics g, Rectangle cell, Image? image)
+    /// <summary>
+    /// One slot box and, if it holds anything, its sprite. The box is
+    /// furniture and is always drawn in its own colours; only the sprite
+    /// answers to <paramref name="live"/>. See <see cref="PanelDimming"/>.
+    /// </summary>
+    private static void DrawSlot(Graphics g, Rectangle cell, Image? image, bool live)
     {
         using (var fill = new SolidBrush(SlotBackground))
             g.FillRectangle(fill, cell);
@@ -250,7 +291,7 @@ internal sealed class TowerProgressPanel : Panel
             g.DrawRectangle(pen, cell);
 
         if (image is not null)
-            g.DrawImage(image, cell);
+            PanelDimming.DrawIcon(g, image, cell, live);
     }
 
     /// <summary>
@@ -265,8 +306,11 @@ internal sealed class TowerProgressPanel : Panel
         bool inTower = true)
     {
         byte[] mask = new byte[AzureDreamsReceiveState.LocationMaskSize];
-        for (int index = 0; index < collectedSlots && index < mask.Length * 8; index++)
-            mask[index >> 3] |= (byte)(1 << (index & 7));
+        for (int index = 0; index < collectedSlots; index++)
+        {
+            if (AzureDreamsReceiveState.TryGetTowerMaskPosition(index, out int byteIndex, out byte bit))
+                mask[byteIndex] |= bit;
+        }
 
         using var panel = new TowerProgressPanel
         {

@@ -4,10 +4,22 @@ An [Archipelago](https://archipelago.gg) randomizer world for the North
 American PlayStation release of **Azure Dreams** (`SLUS-00614`), plus the
 standalone Windows client that connects the running game to a multiworld room.
 
-Ninety-eight checks: two locations on each tower floor from 1 to 39, ten
-Equipment Shop slots, and ten Monster Shop slots. Eight progressive keycards
-open the successive five-floor bands. Arriving on floor 40
-completes the goal.
+A hundred and thirty-seven checks: three locations on each tower floor from 1
+to 39, ten Equipment Shop slots, and ten Monster Shop slots. Eight progressive
+keycards open the successive five-floor bands. Arriving on floor 40 completes
+the goal.
+
+Two of each floor's three are the markers on the ground. The third is carried
+by a monster that does not belong on that floor: it ignores you, heads for an
+exit, and drops the check when you kill it. That one is optional - switch it
+off and a floor has two checks, like it used to.
+
+Monsbaiya has grown a few things to spend gold on, too. A blacksmith in the
+Equipment Shop tempers a weapon or a shield in place; a spell-ball charger
+works beside the fortune teller; and Mademoiselle Shiela herself will read a
+tower floor and tell you what KIND of thing is still waiting up there. How far
+the first two will go is what the Red, Blue and White Sands in the item pool
+buy. All of it is optional, in your YAML.
 
 **Setup is a one-time chore. After that, playing a new seed is one
 double-click.**
@@ -139,6 +151,11 @@ You can play disconnected. The game records pickups and purchases on its own,
 and reconnecting submits what you collected while restoring what the server
 already confirmed. If DuckStation ever closes, use the clients **Launch game**
 to bring it back, and it will reattach on its own without leaving the server.
+
+You can also stop mid-run. The client saves your progress as you climb, and
+`Continue` on the title screen puts you back at the start of the floor you were
+on, with the inventory you rode the elevator up with. Dying lands in the same
+place, so quitting a bad fight is not a way out of it.
 
 ## Where the files go, and a word about disk space
 

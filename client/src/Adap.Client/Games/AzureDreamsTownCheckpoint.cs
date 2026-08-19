@@ -78,6 +78,38 @@ internal static class AzureDreamsTownCheckpoint
     public const uint CurrentFloorAddress = 0x8001_0234;
     public const int TopFloor = 40;
 
+    /// <summary>
+    /// Uncle's shortcut stages the level Koh should start floor 10/20/30 at
+    /// here (`patch.SHORTCUT_PENDING_LEVEL_ADDRESS`), and the generator's
+    /// wrapper on the floor's monster-levelling loop consumes it and clears it
+    /// once Koh's actor exists. Nonzero therefore means "this floor is still
+    /// being built and Koh has not been levelled yet".
+    ///
+    /// <para>This is the tower-floor capture's real completion signal. The
+    /// floor halfword is stamped by the bootstrap helper at the very START of
+    /// the build, so floor number, an idle CD queue and a clear mode-load flag
+    /// can all read ready while generation is still running - and a snapshot
+    /// taken there holds the level Koh had in town. That is the shortcut bug:
+    /// warp to floor 20, quit, resume, and the run comes back at the level the
+    /// climb was supposed to replace.</para>
+    /// </summary>
+    public const uint ShortcutPendingLevelAddress = 0x8001_5fec;
+
+    /// <summary>
+    /// Koh's live UnitStats, and the save-block mirror of it. The game writes
+    /// live -> mirror on a floor transition and never reads it back, so the
+    /// mirror is what a resume restores from and the live struct is the truth.
+    /// A tower-floor capture reconciles the two rather than trusting whichever
+    /// side of the shortcut level grant the game's own copy happened to fall.
+    /// </summary>
+    public const uint LiveUnitStatsAddress = 0x8008_34b8;
+    public const uint SavedUnitStatsAddress = 0x8001_2194;
+    public const int UnitStatsRecordSize = 0x4C;
+    /// <summary>Level within the record; 1-99 for a real Koh.</summary>
+    public const int UnitStatsLevelOffset = 0x11;
+    /// <summary>Current / maximum HP within the record.</summary>
+    public const int UnitStatsMaximumHpOffset = 0x29;
+
     // --- resuming a tower checkpoint -------------------------------------
     //
     // Restoring a tower checkpoint is only half the job: the game has to be
@@ -99,12 +131,32 @@ internal static class AzureDreamsTownCheckpoint
     /// </summary>
     public const uint SavedInTowerFlagAddress = 0x8001_0208;
 
+    /// <summary>
+    /// Koh's twenty physical four-byte descriptors, and the twenty display
+    /// pointers into them. The category byte at +1 is zero for a free slot -
+    /// vanilla's own occupancy test - and the order table terminates on a
+    /// null. Both are inside the snapshot, which is what lets a send be
+    /// subtracted from a stored checkpoint.
+    /// </summary>
+    public const uint InventoryDescriptorAddress = 0x8001_0248;
+    public const uint InventoryOrderAddress = 0x8001_029c;
+    public const int InventorySlotCount = 20;
+
     private const uint SnapshotMagic = 0x5043_4441; // "ADCP"
     private const ushort SnapshotVersion = 1;
     private const ushort SnapshotHeaderSize = 0x50;
     private const int SnapshotHashOffset = 0x30;
     private const int SnapshotHashSize = 32;
     private const string SnapshotExtension = ".adcp";
+    /// <summary>
+    /// Sidecar beside the snapshot holding the gift-delivery watermark as it
+    /// stood when the block was captured. It is not part of the payload
+    /// because it is not game state: gifts are consumed through Archipelago's
+    /// data storage, which a memory rollback cannot touch. Without it a gift
+    /// delivered after a checkpoint is lost on a restore - the item goes back
+    /// with the inventory and the server still calls it delivered.
+    /// </summary>
+    private const string CompanionExtension = ".gifts";
 
     public static bool TryObserve(
         IEmulatorMemory memory,
@@ -197,7 +249,8 @@ internal static class AzureDreamsTownCheckpoint
         AzureDreamsCheckpointReason reason,
         out AzureDreamsCheckpointMetadata metadata,
         out string message,
-        string? snapshotDirectory = null)
+        string? snapshotDirectory = null,
+        string? giftWatermark = null)
     {
         metadata = default;
         if (identity.Signature is null || identity.Signature.Length != 8)
@@ -214,6 +267,8 @@ internal static class AzureDreamsTownCheckpoint
         }
         if (!TryValidatePayloadIdentity(payload, identity, out message))
             return false;
+        if (reason == AzureDreamsCheckpointReason.TowerFloorEntry)
+            RefreshSavedUnitStats(memory, payload);
 
         uint receiveCursor = BinaryPrimitives.ReadUInt32LittleEndian(
             payload.AsSpan(
@@ -269,6 +324,9 @@ internal static class AzureDreamsTownCheckpoint
             message = $"Could not save the town checkpoint: {ex.Message}";
             return false;
         }
+        // After the snapshot, and never fatal: a missing companion costs a
+        // gift replay after a rollback, a missing snapshot costs the run.
+        WriteCompanion(path, giftWatermark);
 
         metadata = new AzureDreamsCheckpointMetadata(
             path,
@@ -387,14 +445,33 @@ internal static class AzureDreamsTownCheckpoint
     public static bool TryRestore(
         IEmulatorMemory memory,
         AzureDreamsSeedIdentity identity,
+        IEnumerable<long>? serverCheckedLocations,
         out AzureDreamsCheckpointMetadata metadata,
+        out int mergedChecks,
         out string message,
-        string? snapshotDirectory = null)
+        string? snapshotDirectory = null,
+        Action<string?>? applyGiftWatermark = null)
     {
         metadata = default;
+        mergedChecks = 0;
         string path = GetSnapshotPath(identity, snapshotDirectory);
         if (!TryRead(path, identity, out byte[] payload, out metadata, out message))
             return false;
+
+        // The server's checked set goes into the payload BEFORE it lands: a
+        // tower-floor checkpoint is taken on arrival, so everything collected
+        // on that floor afterwards is missing from its journal, and a resume
+        // rebuilds that floor (spawner reading the journal) before the poll
+        // loop's own merge could possibly run. Merging into the block first
+        // means the restored floor never respawns a banked marker.
+        int persistentOffset = checked(
+            (int)(AzureDreamsReceiveState.PersistentStateAddress - SaveBlockAddress));
+        if (serverCheckedLocations is not null)
+        {
+            mergedChecks = AzureDreamsReceiveState.MergeCheckedLocationsIntoState(
+                payload.AsSpan(persistentOffset, AzureDreamsReceiveState.PersistentStateSize),
+                serverCheckedLocations);
+        }
 
         if (!memory.TryWrite(SaveBlockAddress, payload, out string? writeError))
         {
@@ -402,8 +479,6 @@ internal static class AzureDreamsTownCheckpoint
             return false;
         }
 
-        int persistentOffset = checked(
-            (int)(AzureDreamsReceiveState.PersistentStateAddress - SaveBlockAddress));
         Span<byte> restoredState = stackalloc byte[AzureDreamsReceiveState.PersistentStateSize];
         if (!memory.TryRead(
                 AzureDreamsReceiveState.PersistentStateAddress,
@@ -421,6 +496,16 @@ internal static class AzureDreamsTownCheckpoint
             message = "The game changed the restored ADSV state before it could be verified.";
             return false;
         }
+
+        // Rewind gift delivery to where it stood when this block was captured,
+        // so anything that entered the world after it is offered again. The
+        // items themselves went back with the block; without this they would
+        // be gone from the game and marked delivered on the server.
+        //
+        // Before the resume is armed: once the game is running a restored
+        // tower floor it can be handed items, and the watermark should already
+        // be the captured one by then.
+        applyGiftWatermark?.Invoke(ReadCompanion(path));
 
         if (metadata.Reason == AzureDreamsCheckpointReason.TowerFloorEntry &&
             !TryArmTowerResume(memory, out message))
@@ -472,6 +557,35 @@ internal static class AzureDreamsTownCheckpoint
         return true;
     }
 
+    /// <summary>
+    /// Copy Koh's LIVE stats over the payload's mirror, which is what a resume
+    /// reads back. Only for a tower-floor capture, where the live struct is
+    /// Koh and is freshly templated.
+    ///
+    /// <para>The game syncs the mirror on a floor transition, so at floor entry
+    /// the two normally agree and this changes nothing. Where it earns its
+    /// keep is the shortcut: Uncle's warp levels Koh from a wrapper on the
+    /// floor's monster-levelling loop, and nothing re-syncs the mirror
+    /// afterwards until the NEXT floor change. Doing the game's own write here
+    /// makes the snapshot right whichever side of that the capture lands on -
+    /// belt to the pending-level braces in TryCaptureTowerFloor.</para>
+    ///
+    /// <para>Refuses on a live record that is not a plausible Koh (no level,
+    /// no maximum HP), so a read taken at a bad moment leaves the game's own
+    /// mirror in place rather than replacing it with zeros.</para>
+    /// </summary>
+    private static void RefreshSavedUnitStats(IEmulatorMemory memory, byte[] payload)
+    {
+        Span<byte> live = stackalloc byte[UnitStatsRecordSize];
+        if (!memory.TryRead(LiveUnitStatsAddress, live, out _))
+            return;
+        int level = live[UnitStatsLevelOffset];
+        if (level is < 1 or > 99 || live[UnitStatsMaximumHpOffset] == 0)
+            return;
+        live.CopyTo(payload.AsSpan(
+            checked((int)(SavedUnitStatsAddress - SaveBlockAddress)), UnitStatsRecordSize));
+    }
+
     private static bool TryValidatePayloadIdentity(
         ReadOnlySpan<byte> payload,
         AzureDreamsSeedIdentity identity,
@@ -493,6 +607,249 @@ internal static class AzureDreamsTownCheckpoint
         if (!state[8..16].SequenceEqual(identity.Signature))
         {
             message = "The save-backed RAM block belongs to a different generated seed.";
+            return false;
+        }
+
+        message = string.Empty;
+        return true;
+    }
+
+    private static string GetCompanionPath(string snapshotPath) =>
+        snapshotPath + CompanionExtension;
+
+    /// <summary>
+    /// Replace the snapshot's gift watermark, or drop it when the caller has
+    /// none. Dropping matters: a stale companion belongs to an older block and
+    /// would rewind gift delivery to the wrong point.
+    /// </summary>
+    private static void WriteCompanion(string snapshotPath, string? content)
+    {
+        string companionPath = GetCompanionPath(snapshotPath);
+        try
+        {
+            if (string.IsNullOrEmpty(content))
+            {
+                if (File.Exists(companionPath))
+                    File.Delete(companionPath);
+                return;
+            }
+
+            string temporaryPath = companionPath + ".tmp";
+            File.WriteAllText(temporaryPath, content);
+            File.Move(temporaryPath, companionPath, overwrite: true);
+        }
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException)
+        {
+            Console.Error.WriteLine(
+                $"Could not store the checkpoint's gift watermark: {ex.Message}. A restore " +
+                "will not re-offer gifts delivered after this checkpoint.");
+        }
+    }
+
+    private static string? ReadCompanion(string snapshotPath)
+    {
+        try
+        {
+            string companionPath = GetCompanionPath(snapshotPath);
+            return File.Exists(companionPath) ? File.ReadAllText(companionPath) : null;
+        }
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException)
+        {
+            Console.Error.WriteLine(
+                $"Could not read the checkpoint's gift watermark: {ex.Message}.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Subtract one sent item from the STORED checkpoint, so a restore cannot
+    /// give it back.
+    ///
+    /// <para>A send is the one thing a rollback must not undo. The item is
+    /// already in another player's world and the token is already spent, so
+    /// restoring the block as captured hands the sender a second copy of both
+    /// - a duplication the recipient never sees and cannot refuse.</para>
+    ///
+    /// <para>Re-capturing on every send would fix that and cost more than it
+    /// is worth: the player would lose the floor they are mid-way through
+    /// beating, because the checkpoint's whole promise is the inventory they
+    /// rode the elevator up with. So the stored block is EDITED instead. One
+    /// token comes off the counter, and the sent descriptor is removed only if
+    /// the checkpoint was already carrying it. An item found on this floor and
+    /// sent from it is not in the stored inventory at all, and then the token
+    /// is the entire correction - exactly as it should be.</para>
+    ///
+    /// <para>Nothing here needs the game: the snapshot is a file, and the live
+    /// counter was decremented by the commit routine itself.</para>
+    /// </summary>
+    public static bool TryAmendForSentItem(
+        AzureDreamsSeedIdentity identity,
+        ReadOnlySpan<byte> descriptor,
+        out bool inventoryEdited,
+        out string message,
+        string? snapshotDirectory = null)
+    {
+        inventoryEdited = false;
+        if (descriptor.Length != 4)
+        {
+            message = "A sent item is four descriptor bytes.";
+            return false;
+        }
+
+        string path = GetSnapshotPath(identity, snapshotDirectory);
+        if (!File.Exists(path))
+        {
+            // No checkpoint to correct. Not an error: nothing can roll back.
+            message = string.Empty;
+            return true;
+        }
+        if (!TryRead(path, identity, out byte[] payload, out AzureDreamsCheckpointMetadata metadata, out message))
+            return false;
+
+        SpendStoredSendToken(payload);
+        inventoryEdited = RemoveStoredInventoryItem(payload, descriptor);
+        return TryRewrite(path, payload, identity, metadata, out message);
+    }
+
+    /// <summary>
+    /// One token off the stored counter, floored at zero. An unwitnessed pair
+    /// is a block the game has not touched yet, which reads as the starting
+    /// grant - so the witness is written alongside, or the game would decide
+    /// the save was new and hand the token straight back.
+    /// </summary>
+    private static void SpendStoredSendToken(byte[] payload)
+    {
+        int countOffset = checked((int)(AzureDreamsReceiveState.SendTokenCountAddress - SaveBlockAddress));
+        int magicOffset = checked((int)(AzureDreamsReceiveState.SendTokenMagicAddress - SaveBlockAddress));
+        uint stored =
+            BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(magicOffset)) ==
+                AzureDreamsReceiveState.SendTokenMagic
+                ? BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(countOffset))
+                : AzureDreamsReceiveState.SendTokenStartingCount;
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            payload.AsSpan(countOffset), stored == 0 ? 0 : stored - 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            payload.AsSpan(magicOffset), AzureDreamsReceiveState.SendTokenMagic);
+    }
+
+    /// <summary>
+    /// Remove one descriptor matching <paramref name="descriptor"/> from the
+    /// stored inventory, and take its pointer out of the display order the way
+    /// the game's own removal does - survivors shift down, a null closes the
+    /// list. Returns false when the checkpoint was not carrying the item,
+    /// which is the ordinary case for something found on the current floor.
+    /// </summary>
+    private static bool RemoveStoredInventoryItem(byte[] payload, ReadOnlySpan<byte> descriptor)
+    {
+        int descriptorBase = checked((int)(InventoryDescriptorAddress - SaveBlockAddress));
+        int slot = -1;
+        int drifted = -1;
+        for (int index = 0; index < InventorySlotCount; index++)
+        {
+            Span<byte> candidate = payload.AsSpan(descriptorBase + index * 4, 4);
+            if (candidate[1] == 0)
+                continue;                                    // free slot: vanilla's own test
+            if (candidate.SequenceEqual(descriptor))
+            {
+                slot = index;
+                break;
+            }
+            // Identity is the id and the category; quality and flags are state
+            // the floor changes. A ball spends charges, a sword gets equipped,
+            // and the descriptor that left is then not byte-identical to the
+            // one the checkpoint holds. Matching on identity alone as a
+            // fallback is what stops that drift reading as "the checkpoint
+            // never had it" and duplicating the item on the next restore.
+            if (drifted < 0 && candidate[0] == descriptor[0] && candidate[1] == descriptor[1])
+                drifted = index;
+        }
+        if (slot < 0)
+            slot = drifted;
+        if (slot < 0)
+            return false;
+
+        uint slotPointer = (uint)(InventoryDescriptorAddress + slot * 4);
+        payload.AsSpan(descriptorBase + slot * 4, 4).Clear();
+
+        int orderBase = checked((int)(InventoryOrderAddress - SaveBlockAddress));
+        int write = 0;
+        for (int read = 0; read < InventorySlotCount; read++)
+        {
+            uint entry = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(orderBase + read * 4));
+            if (entry == 0)
+                break;
+            if (entry == slotPointer)
+                continue;
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(orderBase + write * 4), entry);
+            write++;
+        }
+        if (write < InventorySlotCount)
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(orderBase + write * 4), 0);
+        return true;
+    }
+
+    /// <summary>
+    /// Write an edited payload back over its own snapshot, keeping the reason
+    /// and the capture time - an amendment is a correction to that checkpoint,
+    /// not a new one - and re-deriving the hash and the header's cached
+    /// receive/shop words so TryRead's cross-checks still hold. The companion
+    /// beside it is left exactly as it was; a send changes nothing about which
+    /// gifts have been delivered.
+    /// </summary>
+    private static bool TryRewrite(
+        string path,
+        byte[] payload,
+        AzureDreamsSeedIdentity identity,
+        AzureDreamsCheckpointMetadata metadata,
+        out string message)
+    {
+        int persistentOffset = checked(
+            (int)(AzureDreamsReceiveState.PersistentStateAddress - SaveBlockAddress));
+        uint receiveCursor = BinaryPrimitives.ReadUInt32LittleEndian(
+            payload.AsSpan(persistentOffset + AzureDreamsReceiveState.ReceivedItemCountOffset));
+        uint shopMask = BinaryPrimitives.ReadUInt32LittleEndian(
+            payload.AsSpan(persistentOffset + AzureDreamsReceiveState.PersistentShopMaskOffset));
+
+        byte[] header = new byte[SnapshotHeaderSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(header, SnapshotMagic);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(4), SnapshotVersion);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(6), SnapshotHeaderSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), SaveBlockAddress);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(12), (uint)SaveBlockSize);
+        identity.Signature.CopyTo(header, 16);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(24), receiveCursor);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(28), shopMask);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(32), (uint)metadata.Reason);
+        BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(40), metadata.CreatedUnixMilliseconds);
+        SHA256.HashData(payload).CopyTo(header, SnapshotHashOffset);
+
+        string temporaryPath = path + ".tmp";
+        try
+        {
+            using (FileStream stream = new(
+                       temporaryPath,
+                       FileMode.Create,
+                       FileAccess.Write,
+                       FileShare.None,
+                       16 * 1024,
+                       FileOptions.WriteThrough))
+            {
+                stream.Write(header);
+                stream.Write(payload);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException)
+        {
+            TryDeleteTemporaryFile(temporaryPath);
+            message = $"Could not amend the town checkpoint: {ex.Message}";
             return false;
         }
 
@@ -528,6 +885,16 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
     // The floor whose arrival is already snapshotted, so the per-frame poll
     // captures once per floor instead of once per frame.
     private int _lastTowerFloorCaptured;
+
+    /// <summary>
+    /// Reads the gift-delivery watermark to store beside a capture, and puts
+    /// one back on a restore. Supplied by the client rather than reached for
+    /// here, because the watermark lives on the Archipelago session and this
+    /// class knows only about memory and files.
+    /// </summary>
+    public Func<string?>? GiftWatermarkProvider { get; set; }
+
+    public Action<string?>? GiftWatermarkRestorer { get; set; }
 
     public AzureDreamsTownCheckpointCoordinator(string? snapshotDirectory = null)
     {
@@ -570,18 +937,54 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
         _townReceivePending = false;
     }
 
+    /// <summary>
+    /// One item has left the world for another player's. Correct the stored
+    /// checkpoint so a restore cannot hand it back - see
+    /// <see cref="AzureDreamsTownCheckpoint.TryAmendForSentItem"/>. Reported
+    /// rather than returned: a send that cannot be recorded is worth a console
+    /// line, and is not a reason to stop the poll loop.
+    /// </summary>
+    public void NoteItemSent(
+        AzureDreamsSeedIdentity identity, AzureDreamsItemDescriptor descriptor)
+    {
+        EnsureIdentity(identity);
+        if (!_snapshotExists)
+            return;
+        if (!AzureDreamsTownCheckpoint.TryAmendForSentItem(
+                identity,
+                descriptor.ToBytes(),
+                out bool inventoryEdited,
+                out string message,
+                _snapshotDirectory))
+        {
+            Console.Error.WriteLine(
+                $"Could not record a send against the saved checkpoint: {message} " +
+                "Restoring it would return the sent item and its token.");
+            return;
+        }
+        Console.WriteLine(
+            inventoryEdited
+                ? "Send recorded against the saved checkpoint: the item and its token are gone "
+                  + "from it, so a restore cannot hand them back."
+                : "Send recorded against the saved checkpoint: the token is gone from it. The "
+                  + "item was found after the checkpoint, so it was never in it.");
+    }
+
     public bool TryRestoreAtStartup(
         IEmulatorMemory memory,
         AzureDreamsSeedIdentity identity,
         AzureDreamsTownObservation observation,
         bool saveIsPristine,
+        IEnumerable<long>? serverCheckedLocations,
         out bool restorePending,
         out AzureDreamsCheckpointMetadata? restoredCheckpoint,
+        out int mergedChecks,
         out bool staleRestoreDropped,
         out string message)
     {
         restorePending = false;
         restoredCheckpoint = null;
+        mergedChecks = 0;
         staleRestoreDropped = false;
         EnsureIdentity(identity);
         if (!_restorePending)
@@ -627,9 +1030,12 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
         if (!AzureDreamsTownCheckpoint.TryRestore(
                 memory,
                 identity,
+                serverCheckedLocations,
                 out AzureDreamsCheckpointMetadata restored,
+                out mergedChecks,
                 out message,
-                _snapshotDirectory))
+                _snapshotDirectory,
+                GiftWatermarkRestorer))
         {
             return false;
         }
@@ -682,7 +1088,8 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
                 reason.Value,
                 out AzureDreamsCheckpointMetadata saved,
                 out message,
-                _snapshotDirectory))
+                _snapshotDirectory,
+                GiftWatermarkProvider?.Invoke()))
         {
             return false;
         }
@@ -706,8 +1113,14 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
     ///
     /// <para>The town stability guards do not apply here - there is no town
     /// modal root and no town mailbox - so the rule is narrower: a real floor
-    /// number, no mode load in flight, and an idle CD queue. A capture during
-    /// a floor load would snapshot a half-built floor.</para>
+    /// number, no mode load in flight, an idle CD queue, and no shortcut level
+    /// grant still pending. A capture during a floor load would snapshot a
+    /// half-built floor.</para>
+    ///
+    /// <para>The pending-level guard is the one that was missing. The other
+    /// three all read ready near the START of a floor build, and a shortcut
+    /// warp does its levelling near the END of one, so floor 10/20/30 used to
+    /// snapshot the level the player left town with.</para>
     /// </summary>
     private bool TryCaptureTowerFloor(
         IEmulatorMemory memory,
@@ -745,6 +1158,17 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
         {
             return true;
         }
+        // The shortcut's level grant is still owed to this floor: Koh is not
+        // yet who he will be when the player takes their first step, so this
+        // is not the floor's arrival state. It clears within the same build,
+        // and the poll comes round again in a few milliseconds.
+        Span<byte> pendingLevel = stackalloc byte[1];
+        if (!memory.TryRead(
+                AzureDreamsTownCheckpoint.ShortcutPendingLevelAddress, pendingLevel, out _) ||
+            pendingLevel[0] != 0)
+        {
+            return true;
+        }
 
         if (!AzureDreamsTownCheckpoint.TryCapture(
                 memory,
@@ -752,7 +1176,8 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
                 AzureDreamsCheckpointReason.TowerFloorEntry,
                 out AzureDreamsCheckpointMetadata saved,
                 out message,
-                _snapshotDirectory))
+                _snapshotDirectory,
+                GiftWatermarkProvider?.Invoke()))
         {
             return false;
         }
@@ -810,7 +1235,8 @@ internal sealed class AzureDreamsTownCheckpointCoordinator
                 reason,
                 out AzureDreamsCheckpointMetadata saved,
                 out message,
-                _snapshotDirectory))
+                _snapshotDirectory,
+                GiftWatermarkProvider?.Invoke()))
         {
             return false;
         }

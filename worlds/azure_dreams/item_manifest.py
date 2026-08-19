@@ -30,14 +30,17 @@ _CURSED_BIT = 1 << 18
 FLAG_UNIDENTIFIED = 0x80
 FLAG_CURSED = 0x40
 
-# Ninety native rewards fill the 78 tower checks plus twenty town-shop checks
-# alongside the eight Progressive Keycards.
+# A hundred and twenty-nine native rewards fill the 117 tower checks plus twenty
+# town-shop checks alongside the eight Progressive Keycards. **2026-08-15**: was
+# ninety, for 78 tower checks at two per floor; the third check per floor - the
+# one a monster carries - added 39. The pool is flat and uniform, so this is a
+# count and not a balance decision.
 #
 # **One pool, equal distribution, shops included.** Every reward is drawn as
 # often as every other one; the great/good/junk tiers this file used to carry
 # are gone - they weighted the draw AND the Archipelago classification, and
 # neither survived the decision that the pool is flat.
-REWARD_COUNT = 90
+REWARD_COUNT = 129
 
 # **Odds, not ratios.** Every reward rolls these chances independently. There is
 # deliberately no share, budget or quota anywhere: a seed that keeps hitting the
@@ -529,11 +532,25 @@ FAMILIAR_REWARD_KINDS = tuple(
     + [TEACHING_BALL_REWARDS]
 )
 
+# The blacksmith's progressive unlocks (docs/systems/blacksmith.md): a Red
+# Sand raises his weapon temper level, a Blue Sand his shield level, a White
+# Sand the ball charger's level (docs/systems/fortune-teller.md section 5), and
+# none of them enters the bag any more. items.py puts a fixed three of each into
+# the pool; they are out of every random draw here so a seed cannot hold more.
+SAND_CATEGORY = 10
+RED_SAND_NAME = "Red Sand"
+BLUE_SAND_NAME = "Blue Sand"
+WHITE_SAND_NAME = "White Sand"
+TEMPER_SAND_NAMES = (RED_SAND_NAME, BLUE_SAND_NAME, WHITE_SAND_NAME)
+
 # Everything that is not a ball and not an egg - familiar items INCLUDED. They
 # are only a category to the Monster Shop; anywhere else a Water Crystal is
-# just another item and has to be as likely as one.
+# just another item and has to be as likely as one. Minus the three sands,
+# which are fixed-count progression rather than draws.
 ORDINARY_REWARDS = tuple(
-    r for r in NATIVE_REWARDS if r.category not in (BALL_CATEGORY, EGG_CATEGORY)
+    r
+    for r in NATIVE_REWARDS
+    if r.category not in (BALL_CATEGORY, EGG_CATEGORY) and r.name not in TEMPER_SAND_NAMES
 )
 
 # Rolls are drawn in basis points rather than as floats. Subtracting float

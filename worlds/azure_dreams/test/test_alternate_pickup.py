@@ -101,7 +101,12 @@ class AlternatePickupLayoutTests(unittest.TestCase):
         # Both were visible bugs before this changed.
         self.assertEqual(patch.MARKER_CATEGORY, 0x0B)
         self.assertEqual(patch.MARKER_ID, 0x01)
-        self.assertEqual(patch.MARKER_STATUS, 0xAD)
+        # 0x8D, not the original 0xAD: bit 0x20 is the equipped bit, and the
+        # death drop refuses to drop an equipped carried item - the first
+        # carrier ride held its check and never dropped it (2026-08-15).
+        self.assertEqual(patch.MARKER_STATUS, 0x8D)
+        self.assertEqual(patch.MARKER_STATUS & 0x20, 0)
+        self.assertEqual(patch.MARKER_STATUS & 0x80, 0x80)
 
     def test_the_display_name_borrows_the_shop_wording(self) -> None:
         # The name stays uninformative and the description carries the detail,
@@ -272,7 +277,7 @@ class NameGuardTests(unittest.TestCase):
     def _run(self, descriptor: bytes, caller: int):
         placements = [
             patch.LocationPlacement("Master Sword", "Sandknight", True)
-            for _ in range(78)
+            for _ in range(patch.LOCATION_COUNT)
         ]
         block = patch.build_seed_block(b"12345678", placements)
         harness = _Harness(block)
@@ -443,11 +448,26 @@ class PutInGuardTests(unittest.TestCase):
                 _, harness = self._run(
                     alternate_pickup.IN_HAND_DESCRIPTOR_ADDRESS, marker(slot)
                 )
-                index = (self.FLOOR - 1) * 2 + slot
-                byte = harness.memory.read8(
-                    alternate_pickup.COLLECTION_JOURNAL_ADDRESS + index // 8
+                # One byte per floor, bit = slot (ADSV v4). The journal is
+                # ADSV +0x10 - not a hard-coded address of its own.
+                self.assertEqual(
+                    alternate_pickup.COLLECTION_JOURNAL_ADDRESS,
+                    patch.PERSISTENT_STATE_ADDRESS
+                    + patch.PERSISTENT_LOCATION_MASK_OFFSET,
                 )
-                self.assertEqual(byte, 1 << (index % 8))
+                byte = harness.memory.read8(
+                    alternate_pickup.COLLECTION_JOURNAL_ADDRESS + self.FLOOR - 1
+                )
+                self.assertEqual(byte, 1 << slot)
+                # And nothing else in the journal moved.
+                for other in range(patch.PERSISTENT_TOWER_MASK_BYTES):
+                    if other != self.FLOOR - 1:
+                        self.assertEqual(
+                            harness.memory.read8(
+                                alternate_pickup.COLLECTION_JOURNAL_ADDRESS + other
+                            ),
+                            0,
+                        )
 
     def test_it_refuses_a_floor_that_would_index_past_the_journal(self) -> None:
         harness = self._harness()
@@ -666,14 +686,14 @@ class DescriptionTests(unittest.TestCase):
         return appended, shown, cpu, harness.memory, block
 
     def test_it_shows_what_it_built_rather_than_returning_it(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         _, shown, _, _, _ = self._run(placements, floor=1, slot=0)
         self.assertEqual(shown, [patch.MARKER_DESCRIPTION_BUFFER_ADDRESS])
 
     def test_a_local_placement_still_says_who_it_is_for(self) -> None:
         # "for <you>" is still the answer to who this is for, and the shop says
         # the same thing about its own local slots.
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         appended, _, _, _, block = self._run(placements, floor=1, slot=0)
         self.assertEqual(len(appended), 3)
         self.assertEqual(
@@ -692,7 +712,7 @@ class DescriptionTests(unittest.TestCase):
     def test_the_item_name_alone_never_gains_the_owner_line(self) -> None:
         # The name path passes with_owner clear, and that is what keeps
         # `You're on ...` to one line.
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         harness = _Harness(patch.build_seed_block(b"12345678", placements))
         harness.memory.write32(alternate_pickup.CURRENT_FLOOR_ADDRESS, 1)
         harness.memory.load_bytes(DESCRIPTOR_SCRATCH, marker(0))
@@ -711,7 +731,7 @@ class DescriptionTests(unittest.TestCase):
     def test_a_remote_placement_adds_the_shop_second_line(self) -> None:
         placements = [
             patch.LocationPlacement("Master Sword", "Sandknight", True)
-            for _ in range(78)
+            for _ in range(patch.LOCATION_COUNT)
         ]
         appended, _, _, _, _ = self._run(placements, floor=3, slot=1)
         self.assertEqual(len(appended), 3)
@@ -723,7 +743,7 @@ class DescriptionTests(unittest.TestCase):
     def test_it_terminates_what_it_built(self) -> None:
         placements = [
             patch.LocationPlacement("Master Sword", "Sandknight", True)
-            for _ in range(78)
+            for _ in range(patch.LOCATION_COUNT)
         ]
         appended, _, _, memory, _ = self._run(placements, floor=3, slot=1)
         self.assertEqual(
@@ -732,7 +752,7 @@ class DescriptionTests(unittest.TestCase):
 
     def test_it_reads_the_placement_the_floor_and_slot_select(self) -> None:
         placements = [
-            patch.LocationPlacement(f"Item{index}", "Koh", False) for index in range(78)
+            patch.LocationPlacement(f"Item{index}", "Koh", False) for index in range(patch.LOCATION_COUNT)
         ]
         for floor, slot in ((1, 0), (1, 1), (20, 1), (39, 1)):
             with self.subTest(floor=floor, slot=slot):
@@ -747,13 +767,13 @@ class DescriptionTests(unittest.TestCase):
                 self.assertEqual(appended[0], expected)
 
     def test_a_floor_past_the_tower_falls_back_to_the_display_name(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         appended, shown, _, _, _ = self._run(placements, floor=40, slot=0)
         self.assertEqual(appended, [])
         self.assertEqual(shown, [patch.MARKER_DISPLAY_NAME_ADDRESS])
 
     def test_it_unwinds_the_frame_it_inherited(self) -> None:
-        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(78)]
+        placements = [patch.LocationPlacement("Gold", "Koh", False) for _ in range(patch.LOCATION_COUNT)]
         _, _, cpu, _, _ = self._run(placements, floor=1, slot=0)
         self.assertEqual(cpu.registers[29], self.STACK + 0x20)
         self.assertEqual(cpu.registers[16], 0x1111_1111)

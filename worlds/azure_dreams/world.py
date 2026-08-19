@@ -9,24 +9,30 @@ from worlds.AutoWorld import World
 
 from . import (
     alternate_pickup,
+    blacksmith,
     bonus_floor,
     floor_item_pool,
+    fortune_teller,
     intro_skip,
     item_manifest,
     items,
     locations,
     monster_shop,
+    monster_spawns,
     nada_send,
     native_bugfixes,
     options,
     patch,
+    pool_house,
     regions,
     rules,
     save_removal,
     shop_prices,
+    species_move_fix,
     tower_send,
     town_receive,
     town_shop,
+    town_status_strip,
     town_warp,
     web_world,
 )
@@ -143,9 +149,24 @@ class AzureDreamsWorld(World):
         )
 
     def _tower_placements(self) -> list[patch.LocationPlacement]:
+        """One record per SEED-PAGE slot, which is always three a floor.
+
+        The page's layout, the render resolver's bounds and the journal's bit
+        per slot are all baked into the base patch at three, so a carrier-less
+        seed still emits 117 records - it simply never spawns the third. The
+        filler copies the floor's first placement rather than inventing a name,
+        because the page pools its text: a repeat costs the three-byte
+        reference and no message bytes at all, and the message region is the
+        thing that runs out first in a busy room.
+        """
+
         placements: list[patch.LocationPlacement] = []
+        placed_slots = locations.tower_slots_for(self)
         for floor in range(1, locations.TOWER_FLOOR_COUNT + 1):
             for slot in range(locations.TOWER_SLOTS_PER_FLOOR):
+                if slot >= placed_slots:
+                    placements.append(placements[-1])
+                    continue
                 location = self.get_location(locations.tower_location_name(floor, slot))
                 if location.item is None:
                     raise ValueError(f"Azure Dreams location {location.name!r} was not filled.")
@@ -182,6 +203,27 @@ class AzureDreamsWorld(World):
                 )
         return placements
 
+    def _tower_hint_classes(self) -> list[int]:
+        """One fortune-teller hint class per tower location, in location-index
+        order (`(floor - 1) * slots + slot`, the journal's own order). What her
+        crystal says a check holds - by kind, never by name."""
+
+        classes: list[int] = []
+        placed_slots = locations.tower_slots_for(self)
+        for floor in range(1, locations.TOWER_FLOOR_COUNT + 1):
+            for slot in range(locations.TOWER_SLOTS_PER_FLOOR):
+                if slot >= placed_slots:
+                    # Class 0 reads as "something the mist will not let me
+                    # name", and she never reaches it anyway: her scan mask
+                    # drops the carrier bit with the carrier.
+                    classes.append(0)
+                    continue
+                location = self.get_location(locations.tower_location_name(floor, slot))
+                if location.item is None:
+                    raise ValueError(f"Azure Dreams location {location.name!r} was not filled.")
+                classes.append(fortune_teller.hint_class_for_item(location.item, self.player))
+        return classes
+
     def generate_output(self, output_directory: str) -> None:
         placements = self._tower_placements()
 
@@ -194,15 +236,33 @@ class AzureDreamsWorld(World):
             for other in self.multiworld.get_game_players(self.game)
             if other != self.player
         ][:tower_send.MAX_TARGETS]
+        # The carrier's colour: one of the species' own variant palettes,
+        # drawn per seed (patch.CARRIER_PALETTE_CHOICES owns the account).
+        carrier_palette = self.random.choice(patch.CARRIER_PALETTE_CHOICES)
         seed_block = bytearray(
             patch.build_seed_block(
-                self._seed_signature(), placements, tower_send_targets
+                self._seed_signature(),
+                placements,
+                tower_send_targets,
+                carrier_palette=carrier_palette,
             )
         )
         # The send-mode routines and the target-name table. They live in the
         # seed page but are built here because they reference both patch.py's
         # layout and alternate_pickup's hook addresses.
         tower_send.place_seed_page_blocks(seed_block, tower_send_targets)
+        # Per-floor monster rosters: one native type traded for this floor's
+        # location-check carrier, its slots handed to the survivors. Rolled from
+        # the world's own random, so it is part of the seed.
+        #
+        # With the carrier system off none of it applies: no roster is rewritten
+        # (every floor keeps its vanilla population), the species table stays
+        # zero, and the forced-spawn hook below is not written at all - so the
+        # game's own floor population runs exactly as it shipped.
+        spawn_tables: list[bytes] = []
+        if self.options.carrier_system:
+            spawn_tables, carrier_species = monster_spawns.plan_floor_spawns(self.random)
+            monster_spawns.place_carrier_table(seed_block, carrier_species)
         seed_block = bytes(seed_block)
         # The per-floor text bank: one sector per floor, cut from the FINAL
         # seed block so every sector's static window content is byte-identical
@@ -215,7 +275,14 @@ class AzureDreamsWorld(World):
         )
         description = f"ADAP {self.multiworld.seed_name} P{self.player}"
         player_patch = bytearray(
-            patch.build_player_ppf(base_patch, seed_block, description, floor_pages)
+            patch.build_player_ppf(
+                base_patch,
+                seed_block,
+                description,
+                floor_pages,
+                spawn_tables,
+                carrier_system=bool(self.options.carrier_system),
+            )
         )
         shop_slots: list[town_shop.ShopSlot | None] = [None] * town_shop.SHOP_SLOT_COUNT
         for slot in range(locations.SHOP_LOCATION_COUNT):
@@ -267,12 +334,50 @@ class AzureDreamsWorld(World):
         # generator writes, which is asserted by the disc builder refusing any
         # two records that disagree about a byte.
         native_bugfixes.append_native_bugfix_ppf_records(player_patch)
+        # The group-V move-routine fix: two words in each of the 35 disc copies
+        # of the five species packages whose walk re-aims at Koh and turns a
+        # fleeing carrier into an attacker. Nothing else writes the species
+        # archive (docs/game/carrier-attack-theories.md §1).
+        species_move_fix.append_species_move_fix_ppf_records(player_patch)
+        # Wotta's pool house with every girl present (no-op when
+        # pool_house.POOL_HOUSE_OPEN is off). Seven halfwords in the interior
+        # overlay's spawn templates; nothing else writes TOWN.BIN+0x51E000.
+        pool_house.append_pool_house_ppf_records(player_patch)
+        # The blacksmith: takes over Ghosh's scene entry in the equipment shop
+        # (three overlay edits) and lives in dialogue spans town_shop's trims
+        # freed - nothing else writes either (docs/systems/blacksmith.md).
+        if self.options.temper_system:
+            blacksmith.append_blacksmith_ppf_records(player_patch)
+        # The fortune teller and the ball charger: their conversations, the
+        # natives and this seed's hint-class table, all inside her own dialogue
+        # image (TOWN.BIN+0x62BFC0, loaded only in her building) plus two
+        # overlay words for the charger - nothing else writes either
+        # (docs/systems/fortune-teller.md). Each behind its yaml option.
+        fortune_teller.append_fortune_teller_ppf_records(
+            player_patch,
+            self._tower_hint_classes(),
+            hints=bool(self.options.hint_system),
+            charger=bool(self.options.temper_system),
+            # Her "is this floor done?" test is a mask of the floor's journal
+            # bits. Leaving the carrier bit in it on a carrier-less seed would
+            # make every floor look unfinished forever, and she would sell a
+            # reading for a check that does not exist.
+            slots_per_floor=locations.tower_slots_for(self),
+        )
+        # The town status strip (WEAPON/SHIELD/BALL levels along the top of
+        # the screen, everywhere in town): the town image's free canvas plus
+        # one retargeted jal in the scene runner. Meaningless without the
+        # temper system, so it rides with it (docs/systems/fortune-teller.md 6).
+        if self.options.temper_system and town_status_strip.TOWN_STATUS_STRIP:
+            town_status_strip.append_town_status_strip_ppf_records(player_patch)
         # The floor spawn-pool rebalance: deliberate behaviour change, same for
         # every seed - un-gates the short-run-critical mode-2 items and retunes
         # the rarity-class weights (128/85/32/1 -> 108/85/32/6). Resident flag
         # halfwords plus four instruction words in both floor-generation
         # package copies; nothing else writes either region.
-        floor_item_pool.append_floor_item_pool_ppf_records(player_patch)
+        floor_item_pool.append_floor_item_pool_ppf_records(
+            player_patch, temper_system=bool(self.options.temper_system)
+        )
         alternate_pickup.append_alternate_pickup_ppf_records(player_patch)
         # The tower players-menu Send row. Skipped entirely - no row, no
         # widened loops, no strip - when the room has no other Azure Dreams
@@ -316,7 +421,7 @@ class AzureDreamsWorld(World):
         # JSON keys are strings by the time slot data reaches the client.
         trap_locations: dict[str, int] = {}
         for floor in range(1, locations.TOWER_FLOOR_COUNT + 1):
-            for slot in range(locations.TOWER_SLOTS_PER_FLOOR):
+            for slot in range(locations.tower_slots_for(self)):
                 location = self.get_location(locations.tower_location_name(floor, slot))
                 if (
                     location.item is not None
@@ -340,12 +445,29 @@ class AzureDreamsWorld(World):
             # id would try to deliver one as a native reward, wedging the
             # queue on an item with no descriptor - and would never bank it,
             # so the player would collect tokens that never arrive.
-            "apworld_version": 16,
+            # 17: three tower checks per floor (117), ADSV v4 (moved base, a
+            # one-byte-per-floor tower journal, the town half of one unified
+            # mask, the intro flags in a field of their own), and the third
+            # check rides a monster.
+            # 18: White Sand cuts the line (the ball charger's level byte
+            # beside ADSV); the two yaml toggles below are informational.
+            # 19: `carrier_system` can be OFF, and then a floor has two checks
+            # rather than three. The client has to be told: it draws a chest
+            # per slot and reads the journal a bit per slot, and a client that
+            # assumed three would show 39 checks that can never be collected.
+            "apworld_version": 19,
+            "hint_system": bool(self.options.hint_system),
+            "temper_system": bool(self.options.temper_system),
+            "carrier_system": bool(self.options.carrier_system),
             "trap_locations": trap_locations,
             "tower_location_id_base": locations.LOCATION_ID_BASE,
             "tower_floor_count": locations.TOWER_FLOOR_COUNT,
-            "tower_slots_per_floor": locations.TOWER_SLOTS_PER_FLOOR,
-            "tower_location_count": locations.TOWER_LOCATION_COUNT,
+            # What this room actually placed - two without the carrier - not
+            # the three the seed page is always laid out for.
+            "tower_slots_per_floor": locations.tower_slots_for(self),
+            "tower_location_count": (
+                locations.TOWER_FLOOR_COUNT * locations.tower_slots_for(self)
+            ),
             "shop_location_id_base": locations.SHOP_LOCATION_ID_BASE,
             "shop_location_count": locations.SHOP_LOCATION_COUNT,
             "progressive_keycard_count": items.PROGRESSIVE_KEYCARD_COUNT,

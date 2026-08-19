@@ -19,6 +19,17 @@ internal static class ClientAssets
     private static readonly Lazy<Image?> LockedCrystalImage =
         new(() => Tint(CrystalImage.Value, 0.95f, 0.16f, 0.18f));
     private static readonly Lazy<Image?> LockImage = new(() => Load("lock.png"));
+    // The three sands are one sprite in three colours. The art is the red
+    // pouch, which is why Red is the untinted one.
+    private static readonly Lazy<Image?> RedSandImage = new(() => Load("sand.png"));
+    // Tinting collapses the sprite to luminance first, and the red pouch's
+    // luminance is low - so a factor of 1 comes out nearly black. Both of
+    // these are scaled well past 1 to land at the brightness the red art
+    // already has; the matrix clamps whatever overshoots.
+    private static readonly Lazy<Image?> BlueSandImage =
+        new(() => Tint(RedSandImage.Value, 0.55f, 1.05f, 2.10f));
+    private static readonly Lazy<Image?> WhiteSandImage =
+        new(() => Tint(RedSandImage.Value, 1.95f, 1.95f, 1.95f));
     // Until a lock sprite is supplied, a red chest still reads as "not yet
     // available" and is clearly distinct from an ordinary or emptied slot.
     private static readonly Lazy<Image?> LockedSlotImage =
@@ -41,6 +52,15 @@ internal static class ClientAssets
 
     /// <summary>The floor 40 goal marker.</summary>
     public static Image? Medal => MedalImage.Value;
+
+    /// <summary>Red Sand: how far the smith may temper a weapon.</summary>
+    public static Image? RedSand => RedSandImage.Value;
+
+    /// <summary>Blue Sand: how far the smith may temper a shield.</summary>
+    public static Image? BlueSand => BlueSandImage.Value;
+
+    /// <summary>White Sand: how full the charger fills a spell ball.</summary>
+    public static Image? WhiteSand => WhiteSandImage.Value;
 
     /// <summary>A slot in a shop the player cannot reach yet.</summary>
     public static Image? LockedSlot => LockedSlotImage.Value;

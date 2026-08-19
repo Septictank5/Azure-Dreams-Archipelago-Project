@@ -69,7 +69,38 @@ VANILLA_HANDLERS = (
 )
 
 # The dispatcher's two instruction pairs (lui/addiu) and the count immediate.
-TABLE_LUI_ADDRESS = 0x8004_FF70      # lui   v0,0x8007
+#
+# THE DISPATCHER LOADS THE TABLE'S UPPER HALF FROM TWO PLACES, NOT ONE.
+# `FUN_8004FF20` reaches the `addiu` at 0x8004FF78 by two routes:
+#
+#     8004ff58: bne  a1,v0,0x8004ff74   ; [state+0x20] != 2
+#     8004ff5c:  _lui v0,0x8007         ; DELAY SLOT - the branch-taken copy
+#     ...
+#     8004ff70: lui  v0,0x8007          ; the fall-through copy
+#     8004ff74: lw   v1,0x1c(s0)
+#     8004ff78: addiu v0,v0,0x179c      ; fed by EITHER lui
+#
+# Patching only 0x8004FF70 left the branch-taken path computing
+# 0x80070000 + 0xFFFF8D60 = 0x80068D60 and `jalr`ing a word of .text read as a
+# function pointer (row 2 -> 0x0045102A, row 3 -> 0x10400004, row 4 -> 0).
+#
+# The branch is taken when the row's flag byte at 0x800717B4 is non-zero -
+# rows 2 Line up / 3 Fuse / 4 Command, flags `00 00 01 01 01 00` - AND
+# [state+0x20] != 2. That word is written immediately before the call from
+# 0x800502E0 -> 0x8004FF00 -> the front-menu classifier at 0x80021300, which
+# returns 2 when the players menu is paged to KOH and 0 or 1 when it is paged
+# to a FAMILIAR. So: confirming Line up / Fuse / Command with the stat panel
+# flipped to a familiar crashed. Found 2026-08-18 by the class-system RE pass
+# and reproduced on demand the same day; it is also the unexplained fuse crash
+# from an earlier session. ADAP's own Send row (index 6) reads flag byte
+# 0x800717BA = 0x00 and was always on the safe path.
+#
+# Vanilla is unaffected: both `lui`s load 0x8007 there, so the two routes agree.
+# The defect is purely a consequence of relocating the table.
+#
+# docs/systems/class-system.md section 7; docs/HANDOFF.md open bug 5.
+TABLE_LUI_ADDRESS = 0x8004_FF70      # lui   v0,0x8007  (fall-through)
+TABLE_LUI_DELAY_SLOT_ADDRESS = 0x8004_FF5C  # lui v0,0x8007 (branch-taken)
 TABLE_ADDIU_ADDRESS = 0x8004_FF78    # addiu v0,v0,0x179C
 ROW_COUNT_ADDRESS = 0x8005_0458      # addiu a2,zero,0x0006
 
@@ -801,6 +832,9 @@ def iter_tower_send_file_patches(
             for address, value in FEET_HAND_POSITION_PATCHES
         ),
         (TABLE_LUI_ADDRESS, struct.pack("<I", _TABLE_LUI_WORD)),
+        # Both routes to the addiu, not just the fall-through one - see the
+        # comment on TABLE_LUI_DELAY_SLOT_ADDRESS.
+        (TABLE_LUI_DELAY_SLOT_ADDRESS, struct.pack("<I", _TABLE_LUI_WORD)),
         (TABLE_ADDIU_ADDRESS, struct.pack("<I", _TABLE_ADDIU_WORD)),
         (ROW_COUNT_ADDRESS, struct.pack("<I", _ROW_COUNT_WORD)),
         (FADE_BOUND_ADDRESS, struct.pack("<I", _FADE_BOUND_WORD)),

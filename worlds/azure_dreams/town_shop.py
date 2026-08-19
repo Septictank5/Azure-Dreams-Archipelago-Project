@@ -4,6 +4,9 @@ import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from . import patch
+from .pool_house import POOL_HOUSE_OPEN as _POOL_HOUSE_OPEN
+
 
 SHOP_COUNT = 3
 SLOTS_PER_SHOP = 10
@@ -63,7 +66,14 @@ SHOP_DATA_END_OFFSET = 0xCD0
 # The send-menu UI gates live in the spare span between the ADGS gift
 # mailbox (ends 0xBD4) and the door-gate latch word (0xC3C); everything
 # from SHOP_DATA_END_OFFSET up belongs to town_receive.
-PRICE_VISIBILITY_GATE_OFFSET = 0xBD4
+# The smith price gate (2026-08-16): the buy-price resolver's fallback jumps
+# here instead of straight to the vanilla buy price; SMITH marker -> the
+# smith's temper-cost native, anything else -> vanilla. It takes the slot of
+# the RETIRED send-menu price-visibility gate (0xBD4..0xC04): that gate's hook
+# site 0x800B1090 is written back to its vanilla `jal 0x800B0F94` - the
+# deliberate cleanup docs/systems/nada-send.md 5.6 anticipated.
+SMITH_PRICE_GATE_OFFSET = 0xBD4
+SMITH_PRICE_GATE_END_OFFSET = 0xC04
 CHECKED_TAG_GATE_OFFSET = 0xC04
 SEND_HEADER_TEXT_OFFSET = 0xC2C
 SEND_UI_GATES_END_OFFSET = 0xC3C
@@ -125,7 +135,7 @@ BUY_PRICE_ADDRESS = SHOP_CORE_ADDRESS + BUY_PRICE_OFFSET
 ITEM_NAME_ADDRESS = SHOP_CORE_ADDRESS + ITEM_NAME_OFFSET
 DESCRIPTION_RESOLVER_ADDRESS = SHOP_CORE_ADDRESS + DESCRIPTION_RESOLVER_OFFSET
 MENU_CONSTRUCTOR_ADDRESS = SHOP_CORE_ADDRESS + MENU_CONSTRUCTOR_OFFSET
-PRICE_VISIBILITY_GATE_ADDRESS = SHOP_CORE_ADDRESS + PRICE_VISIBILITY_GATE_OFFSET
+SMITH_PRICE_GATE_ADDRESS = SHOP_CORE_ADDRESS + SMITH_PRICE_GATE_OFFSET
 CHECKED_TAG_GATE_ADDRESS = SHOP_CORE_ADDRESS + CHECKED_TAG_GATE_OFFSET
 SEND_HEADER_TEXT_ADDRESS = SHOP_CORE_ADDRESS + SEND_HEADER_TEXT_OFFSET
 INTRO_STATE_WRITER_ADDRESS = SHOP_CORE_ADDRESS + INTRO_STATE_WRITER_OFFSET
@@ -155,15 +165,19 @@ SHOP_CHECKED_ENTRY_FLAG = 0x20
 SHOP_DISABLED_ENTRY_FLAG = 0x80
 SHOP_CHECKED_ENTRY_FLAG_WORD = SHOP_CHECKED_ENTRY_FLAG << 24
 
-PERSISTENT_STATE_ADDRESS = 0x8001_5FC0
-PERSISTENT_STATE_MAGIC = 0x5653_4441
-# Mirrors patch.py (the import cycle keeps two copies; the suite asserts they
-# agree). 3: the +0x28 gold-granted counter - see patch.py for the account.
-PERSISTENT_STATE_VERSION = 3
-PERSISTENT_STATE_SIZE = 0x2C
-PERSISTENT_GOLD_GRANTED_OFFSET = 0x28
-PERSISTENT_KEYCARD_LEVEL_OFFSET = 0x20
-PERSISTENT_SHOP_MASK_OFFSET = 0x24
+# The ADSV record. patch.py owns the layout; these used to be a second copy
+# "because of the import cycle", but there is no cycle - patch imports only
+# bonus_floor - and the copy went stale on the 2026-08-15 v4 re-lay while the
+# suite's agreement check missed it. Aliases only, from here on.
+PERSISTENT_STATE_ADDRESS = patch.PERSISTENT_STATE_ADDRESS
+PERSISTENT_STATE_MAGIC = patch.PERSISTENT_STATE_MAGIC
+PERSISTENT_STATE_VERSION = patch.PERSISTENT_STATE_VERSION
+PERSISTENT_STATE_SIZE = patch.PERSISTENT_STATE_SIZE
+PERSISTENT_GOLD_GRANTED_OFFSET = patch.PERSISTENT_GOLD_GRANTED_OFFSET
+PERSISTENT_KEYCARD_LEVEL_OFFSET = patch.PERSISTENT_KEYCARD_LEVEL_OFFSET
+# The town half of the unified location mask; the shop's whole-word store
+# covers its first 32 bits, of which twenty are checks today.
+PERSISTENT_SHOP_MASK_OFFSET = patch.PERSISTENT_SHOP_MASK_OFFSET
 PERSISTENT_SHOP_MASK_ADDRESS = PERSISTENT_STATE_ADDRESS + PERSISTENT_SHOP_MASK_OFFSET
 
 VANILLA_BUY_PRICE_ADDRESS = 0x8004_A638
@@ -503,6 +517,20 @@ DOOR_LOCKED_MESSAGE = "Door is locked."
 # their vanilla path. They stay hooked until they are removed deliberately;
 # see docs/systems/nada-send.md, "What was removed".
 SEND_MENU_SHOP_MARKER = 3
+# ACTIVE_SHOP marker for the BLACKSMITH's temper menu (2026-08-16,
+# docs/systems/blacksmith.md). Set by the smith's opener native (which also
+# arms the constructor guard), cleared by his after-menu native. Two of the
+# slab pieces below key on it: the check-capacity gate hands the A press to
+# the smith's guard (an immediate purchase instead of a row toggle), and the
+# buy-price resolver's fallback goes through the smith price gate so the row
+# price column shows the temper cost. The smith's natives live in the
+# equipment shop's dialogue image, which is only loaded - and this marker only
+# set - while that shop is open; the two entry points the slab jumps to are a
+# fixed table at the head of the natives block.
+SMITH_MENU_SHOP_MARKER = 4
+SMITH_NATIVE_TABLE_ADDRESS = 0x8001_9884   # = blacksmith.NATIVE_BLOCK_ADDRESS, asserted there
+SMITH_PRICE_ENTRY_ADDRESS = SMITH_NATIVE_TABLE_ADDRESS + 0x0   # a0 = descriptor -> v0 = temper cost
+SMITH_GUARD_ENTRY_ADDRESS = SMITH_NATIVE_TABLE_ADDRESS + 0x8   # a0 = menu+0x20 -> purchase, v0 = 1/0
 # The physical inventory: twenty four-byte descriptors; a slot is occupied
 # exactly when its category byte at +1 is nonzero (the game's own rule,
 # validated by the Uncle shortcut count).
@@ -518,7 +546,9 @@ TOWN_BUY_PRICE_POINTER_ADDRESS = 0x800D_3D18
 TOWN_MENU_CONSTRUCTOR_POINTER_ADDRESS = 0x800D_3D30
 SELECTED_DESCRIPTION_HOOK_ADDRESSES = (0x8004_949C, 0x8004_94E0)
 
-# The send-menu UI gates (v108), DORMANT since 2026-08-11.  The generic list
+# The send-menu UI gates (v108), DORMANT since 2026-08-11 - and the price
+# gate RETIRED 2026-08-16 (its slot holds the smith price gate, its hook site
+# is vanilla again; the tag gate below is still hooked and dormant).  The generic list
 # renderer's row loop asks a per-entry test whether to draw a price
 # (`jal 0x800B0F94` - its only call site; categories 0x16/0x19 are the game's
 # own priceless rows), and the checked-row colorizer stores a BUY/SELL tag
@@ -560,6 +590,41 @@ SAVED_HIGHEST_FLOOR_ADDRESS = 0x8001_2D60
 MONSTER_HUT_FIRST_SLOT_ADDRESS = 0x8001_0980
 KEWNE_EGG_RECORD_WORD = 0x0000_1202  # id 0x02, category 0x12 (egg)
 
+def story_flag_write(*flag_ids: int) -> tuple[int, int]:
+    """(address, OR mask) for story flags that share one bitset word."""
+    words = {flag_id >> 5 for flag_id in flag_ids}
+    if len(words) != 1:
+        raise ValueError("story_flag_write takes flags from a single 32-bit word")
+    (word,) = words
+    mask = 0
+    for flag_id in flag_ids:
+        mask |= 1 << (flag_id & 31)
+    return (STORY_FLAG_ARRAY_ADDRESS + word * 4, mask)
+
+
+# Wotta's pool house, open from the first visit (shipped as an easter egg -
+# see `pool_house.POOL_HOUSE_OPEN`, which also forces every girl's spawn
+# record present).
+#
+# **Measured, not guessed** (m1 ride): the delta between a save taken mid-quest
+# and one taken after the Water Medal was actually delivered
+# (`Wotta_pool_house_open_quest_complete.sav` -> `Wotta_pool_house_position_check.sav`).
+# The pool-house entry script `0x8001D07C` is `if flag(0x0600) is CLEAR goto
+# the event chain; else END`, so **0x0600 is the master switch** for having
+# control on entry; 0x05FB/0x05FC/0x05FD are the chain's three stage markers
+# (stage C at 0x8001F271 is the "Did you get the Water Medal back?" nag), and
+# 0x11FC is both "medal delivered" and the scene init's dry-pool gate at
+# 0x80016544 - the only place any pool-house code reads it. 0x11F9 is
+# "quest started", kept so the state is coherent for anything else that
+# reads it.
+#
+# An earlier revision of this list carried 0x05FE, which was WRONG: that flag
+# is Wotta's variant advance, set only by the in-pool delivery script at
+# 0x8001985C, and the measured post-quest save has it CLEAR (the delivery the
+# player actually took runs 0x8001F8A2, which sets 0x05FD instead).
+# docs/systems/pool-house.md owns the account.
+POOL_HOUSE_QUEST_DONE_FLAGS = (0x05FB, 0x05FC, 0x05FD, 0x0600, 0x11F9, 0x11FC)
+
 # (address, OR mask) pairs; the trailing zero pair terminates the table.
 INTRO_STATE_WRITES = (
     (MONSTER_HUT_FIRST_SLOT_ADDRESS, KEWNE_EGG_RECORD_WORD),
@@ -567,6 +632,19 @@ INTRO_STATE_WRITES = (
     # stable delta of that snapshot pair - v113 verifies this pair in
     # isolation.
     (STORY_FLAG_ARRAY_ADDRESS + 0x1B4, 0x0000_1800),
+    # The pool house, open from the first visit - see
+    # POOL_HOUSE_QUEST_DONE_FLAGS. Three words: 0x05FB/5FC/5FD share one,
+    # 0x0600 opens the next, 0x11F9/0x11FC share a third.
+    # Gated by pool_house.POOL_HOUSE_OPEN.
+    *(
+        (
+            story_flag_write(0x05FB, 0x05FC, 0x05FD),
+            story_flag_write(0x0600),
+            story_flag_write(0x11F9, 0x11FC),
+        )
+        if _POOL_HOUSE_OPEN
+        else ()
+    ),
     # RETIRED in v113 (played 2026-07-28: "a lot of things broke, but
     # the tutorial removal didn't actually work") - the flag delta below
     # was the stable diff of the tutorial snapshots but is NOT what
@@ -916,8 +994,8 @@ def _build_purchase_commit() -> bytes:
 
 def _build_state_initializer() -> bytes:
     # Validate magic, version/size, and the generated eight-byte signature.
-    # A mismatch creates a fresh 40-byte journal before the shop reads or
-    # mutates its check mask. This is ordinary save data, not client-owned RAM.
+    # A mismatch creates a fresh ADSV record (patch.PERSISTENT_STATE_SIZE)
+    # before the shop reads or mutates its check mask. This is ordinary save data, not client-owned RAM.
     b = _MipsBuilder()
     _load_address(b, 8, PERSISTENT_STATE_ADDRESS)
     _load_address(b, 10, SHOP_CORE_ADDRESS + SEED_SIGNATURE_OFFSET)
@@ -954,13 +1032,10 @@ def _build_state_initializer() -> bytes:
         0,
         _i(0x2B, 8, 9, 8),
         _i(0x2B, 8, 10, 12),
-        _i(0x2B, 8, 0, 0x10),
-        _i(0x2B, 8, 0, 0x14),
-        _i(0x2B, 8, 0, 0x18),
-        _i(0x2B, 8, 0, 0x1C),
-        _i(0x2B, 8, 0, PERSISTENT_KEYCARD_LEVEL_OFFSET),
-        _i(0x2B, 8, 0, PERSISTENT_SHOP_MASK_OFFSET),
-        _i(0x2B, 8, 0, PERSISTENT_GOLD_GRANTED_OFFSET),
+    )
+    # Same zero span as the tower initializer, from the same helper.
+    patch._emit_persistent_state_zero_loop(b, base=8, cursor=9, end=10, label="zero")
+    b.emit(
         # Fresh save: tail into the intro-state writer (Kewne hut egg, no
         # tutorial floor, no tower-entrance sequence), which returns to
         # the original caller.  The already-initialized path above returns
@@ -1024,6 +1099,30 @@ def _build_buy_price_resolver() -> bytes:
     _emit_manifest_record_address(b, 8)
     b.emit(_i(0x23, 8, 2, 4), _r(31, 0, 0, 0, 0x08), 0)
     b.label("fallback")
+    # Not an AP row: through the smith price gate (temper cost while the
+    # blacksmith's menu is open, vanilla buy price otherwise). t9 still holds
+    # the slab base from the lookup above; the gate relies on it.
+    b.emit(_j(0x02, SMITH_PRICE_GATE_ADDRESS), 0)
+    return b.build()
+
+
+def _build_smith_price_gate() -> bytes:
+    """Row price for the blacksmith's temper menu.
+
+    Reached only from the buy-price resolver's fallback (t9 = slab base, a0 =
+    the catalog descriptor). While ACTIVE_SHOP is the smith marker the price
+    is the smith's temper cost for that descriptor's quality; every other menu
+    gets the vanilla buy price it always got. Both targets return to the row
+    builder's own `jal`.
+    """
+
+    b = _MipsBuilder()
+    b.emit(_i(0x24, 25, 8, ACTIVE_SHOP_OFFSET))         # lbu t0, ACTIVE_SHOP(t9)
+    b.emit(_i(0x09, 0, 9, SMITH_MENU_SHOP_MARKER))      # li t1, marker (load delay)
+    b.branch(0x05, 8, 9, "vanilla")                     # bne -> vanilla price
+    b.emit(0)
+    b.emit(_j(0x02, SMITH_PRICE_ENTRY_ADDRESS), 0)
+    b.label("vanilla")
     b.emit(_j(0x02, VANILLA_BUY_PRICE_ADDRESS), 0)
     return b.build()
 
@@ -1219,7 +1318,9 @@ def _build_intro_state_writer() -> bytes:
 
 
 def _build_price_visibility_gate() -> bytes:
-    """No price text on the send menu's rows.
+    """RETIRED 2026-08-16 (kept for the record, not emitted): no price text on
+    the send menu's rows. Its slab slot is the smith price gate now and its
+    hook site is back to vanilla.
 
     Interposed on the row loop's only call to the per-entry price test
     (`0x800B0F94`).  Sends cost nothing, so while the active AP shop is
@@ -1268,31 +1369,34 @@ def _build_checked_tag_gate() -> bytes:
 
 
 def _build_check_capacity_gate() -> bytes:
-    """No bag-capacity limit on the send menu's checks.
+    """The A press on a blacksmith row is a purchase, not a check.
 
     Interposed on the A-press handler's only call to the check-capacity
-    guard (`0x800AD99C`), which enforces the vanilla BUY rule:
-    checked rows + occupied inventory slots must stay under twenty. A send
-    removes items from the bag, so that rule inverted into "you may only
-    check as many items as you have EMPTY slots" - a nineteen-item bag
-    could send exactly one item per conversation. While the active AP shop
-    is the send marker the guard answers 1 (allowed) unconditionally; the
-    familiar refusal is upstream of the guard (`0x80` at `0x800ADA54`) and
-    is untouched. Every other menu tail-calls the vanilla guard, whose
-    `jr ra` returns to the original caller because this gate was reached
-    by the caller's own `jal`.
+    guard (`0x800AD99C`, the vanilla "checked rows + occupied slots under
+    twenty" BUY rule; the handler toggles the row's 0x20 bit and recolours it
+    when the guard answers nonzero, plays the refusal sound and shows
+    `[0x800D1558]` when it answers 0). While the active AP shop is the SMITH
+    marker the call is handed to the smith's guard native, which debits the
+    temper cost, bumps the item's quality, rebuilds the rows and answers 1 -
+    with the row's 0x20 bit pre-set so the toggle that follows clears it
+    again - or answers 0 (the opener has repointed the refusal message at
+    `Not enough gold`). Every other menu tail-calls the vanilla guard, whose
+    `jr ra` returns to the original caller because this gate was reached by
+    the caller's own `jal`.
+
+    History: v108-2026-08-11 this gate lifted the limit for Nada's send menu
+    (marker 3), which is gone; the send marker is not tested here any more.
+    The familiar refusal is upstream of the guard (`0x80` at `0x800ADA54`)
+    and is untouched.
     """
 
     b = _MipsBuilder()
     _load_address(b, 8, SHOP_CORE_ADDRESS)
     b.emit(_i(0x24, 8, 9, ACTIVE_SHOP_OFFSET), 0)      # lbu t1 (+load delay)
-    b.emit(_i(0x09, 0, 10, SEND_MENU_SHOP_MARKER))     # li t2,marker
+    b.emit(_i(0x09, 0, 10, SMITH_MENU_SHOP_MARKER))    # li t2,marker
     b.branch(0x05, 9, 10, "vanilla")                   # bne -> vanilla guard
     b.emit(0)
-    b.emit(
-        _r(31, 0, 0, 0, 0x08),                         # jr ra
-        _i(0x09, 0, 2, 1),                             # (delay) v0 = 1
-    )
+    b.emit(_j(0x02, SMITH_GUARD_ENTRY_ADDRESS), 0)     # the smith's purchase
     b.label("vanilla")
     b.emit(_j(0x02, VANILLA_CHECK_CAPACITY_GUARD_ADDRESS), 0)
     return b.build()
@@ -1567,10 +1671,10 @@ def build_town_shop_payload(
             "intro-state table",
         ),
         (
-            PRICE_VISIBILITY_GATE_OFFSET,
-            _build_price_visibility_gate(),
-            CHECKED_TAG_GATE_OFFSET,
-            "send-menu price gate",
+            SMITH_PRICE_GATE_OFFSET,
+            _build_smith_price_gate(),
+            SMITH_PRICE_GATE_END_OFFSET,
+            "smith price gate (the retired send price-visibility gate's slot)",
         ),
         (
             CHECKED_TAG_GATE_OFFSET,
@@ -1588,7 +1692,7 @@ def build_town_shop_payload(
             CHECK_CAPACITY_GATE_OFFSET,
             _build_check_capacity_gate(),
             CHECK_CAPACITY_GATE_END_OFFSET,
-            "send-menu capacity gate",
+            "check-capacity gate (smith purchase)",
         ),
     )
     for offset, code, end, name in regions:
@@ -2006,8 +2110,11 @@ def iter_town_shop_hook_file_patches() -> tuple[tuple[int, bytes], ...]:
             struct.pack("<I", _j(0x03, BUY_PRICE_ADDRESS)),
         ),
         (
+            # The retired send price-visibility gate's site, restored to its
+            # vanilla `jal 0x800B0F94` (an explicit record so a disc built
+            # from an older base patch cannot keep the old gate).
             town_runtime_to_file_offset(GENERIC_PRICE_VISIBILITY_HOOK_ADDRESS),
-            struct.pack("<I", _j(0x03, PRICE_VISIBILITY_GATE_ADDRESS)),
+            struct.pack("<I", _j(0x03, VANILLA_PRICE_VISIBILITY_GATE_ADDRESS)),
         ),
         (
             # `j resume / sw tag` becomes `j gate / nop`: the store is

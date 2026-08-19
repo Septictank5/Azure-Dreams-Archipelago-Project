@@ -116,11 +116,14 @@ class TestFloorItemPool(unittest.TestCase):
                 )
                 self.assertEqual((edit.replacement >> 16) & 31, vanilla_rt)
 
-    def test_the_new_pool_total_is_5904(self) -> None:
+    def test_the_new_pool_total_is_5603(self) -> None:
         # The number the rebalance was designed around: normal-floor pool
         # total 5904 with weights 108/85/32/6, making each class-3 item a
-        # 1-in-984 per rolled item. Recomputed from the disc's own definition
-        # tables with the flag edits applied.
+        # 1-in-984 per rolled item - minus the two class-0 sands (2 x 108)
+        # the blacksmith took off the floors on 2026-08-16 (5688), minus the
+        # class-1 White Sand (85) the ball charger took the same day, so 5603
+        # and a class-3 item is 1-in-934. Recomputed from the disc's own
+        # definition tables with the flag edits applied.
         if not ORIGINAL_DISC.is_file():
             self.skipTest("The original disc image is not present.")
         edits = {
@@ -153,7 +156,7 @@ class TestFloorItemPool(unittest.TestCase):
                     ):
                         new_total += floor_item_pool.CLASS_WEIGHTS[(flags >> 12) & 3]
         self.assertEqual(vanilla_total, 5_746)
-        self.assertEqual(new_total, 5_904)
+        self.assertEqual(new_total, 5_603)
 
     def test_the_records_emit_as_ppf_without_overlap(self) -> None:
         ppf = bytearray()
@@ -168,8 +171,8 @@ class TestFloorItemPool(unittest.TestCase):
             self.assertLessEqual(within + length, 24 + 2_048)
             position += 5 + length
         self.assertEqual(position, len(ppf), "A PPF record ran off the end.")
-        # 14 flag halfwords + 4 instruction words in each of 2 copies.
-        self.assertEqual(len(spans), 22)
+        # 15 resident flag halfwords + 4 instruction words in each of 2 copies.
+        self.assertEqual(len(spans), 23)
         spans.sort()
         for (_, first_end), (second_start, _) in zip(spans, spans[1:]):
             self.assertLessEqual(first_end, second_start, "Records overlap.")

@@ -158,16 +158,23 @@ internal static class AzureDreamsGiftService
     /// then acks the record. Nada's town `ADGS` record was polled here too
     /// until her send was removed in world 0.9.109.
     /// </summary>
+    /// <param name="onItemLeftTheWorld">
+    /// Called once per shipped item, after it is in the target's giftbox.
+    /// A send is the one player action a checkpoint restore must not undo -
+    /// the item is in someone else's world by then - so the client uses this
+    /// to subtract it from the stored checkpoint.
+    /// </param>
     public static void ProcessOutgoing(
         IArchipelagoSession session,
         IEmulatorMemory memory,
         int localSlot,
-        string localPlayerName)
+        string localPlayerName,
+        Action<AzureDreamsItemDescriptor>? onItemLeftTheWorld = null)
     {
         ProcessOutgoingMailbox(
             session, memory, localSlot, localPlayerName,
             TowerGiftMailboxAddress, TowerGiftMailboxMagic,
-            TowerGiftMailboxMaxItems);
+            TowerGiftMailboxMaxItems, onItemLeftTheWorld);
     }
 
     private static void ProcessOutgoingMailbox(
@@ -177,7 +184,8 @@ internal static class AzureDreamsGiftService
         string localPlayerName,
         uint mailboxAddress,
         uint mailboxMagic,
-        int mailboxMaxItems)
+        int mailboxMaxItems,
+        Action<AzureDreamsItemDescriptor>? onItemLeftTheWorld)
     {
         Span<byte> header = stackalloc byte[GiftMailboxItemsOffset];
         if (!memory.TryRead(mailboxAddress, header, out _))
@@ -225,6 +233,7 @@ internal static class AzureDreamsGiftService
         string key = BoxKey(team, targetSlot);
         var gifts = new JArray();
         var shippedNames = new List<string>();
+        var shipped = new List<AzureDreamsItemDescriptor>();
         for (int index = 0; index < count; index++)
         {
             byte itemId = items[index * 4];
@@ -253,6 +262,7 @@ internal static class AzureDreamsGiftService
                 [DescriptorField] = PackDescriptor(itemId, category, quality, flags),
             });
             shippedNames.Add(itemName);
+            shipped.Add(descriptor);
         }
 
         if (gifts.Count > 0)
@@ -261,6 +271,11 @@ internal static class AzureDreamsGiftService
             // Initialize seeds an empty list for the first gift.
             session.DataStorage[Scope.Global, key].Initialize(new JArray());
             session.DataStorage[Scope.Global, key] += gifts;
+            // Only once the giftbox has them: an item reported gone before it
+            // has actually left would be taken off a checkpoint that is still
+            // the only copy of it.
+            foreach (AzureDreamsItemDescriptor descriptor in shipped)
+                onItemLeftTheWorld?.Invoke(descriptor);
         }
         AcknowledgeSend(memory, mailboxAddress, sequence);
         foreach (string itemName in shippedNames)
@@ -883,6 +898,86 @@ internal static class AzureDreamsGiftService
         {
             Console.Error.WriteLine($"Gift watermark write failed: {exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// The gift-delivery watermark as it stands now, as JSON, for storing
+    /// beside a checkpoint. Null before any session has loaded one, which
+    /// simply means the checkpoint gets no companion and a restore leaves
+    /// gift delivery where it is.
+    /// </summary>
+    public static string? CaptureConsumedWatermark()
+    {
+        if (_watermarkSession is null)
+            return null;
+        var senders = new JObject();
+        foreach ((string sender, long sequence) in ConsumedBySender)
+            senders[sender] = sequence;
+        return new JObject
+        {
+            [ConsumedSendersField] = senders,
+            [ConsumedAckField] = _confirmedMailboxAck,
+        }.ToString(Newtonsoft.Json.Formatting.None);
+    }
+
+    /// <summary>
+    /// Put gift delivery back where it stood when a checkpoint was captured,
+    /// so every gift that arrived after it is offered again.
+    ///
+    /// <para>This is the receiving half of the rule a send obeys on the other
+    /// side. A checkpoint rolls the game's memory back, and the gifted item
+    /// goes back with it - but "delivered" is recorded in Archipelago's data
+    /// storage, which no memory restore can reach. Left alone, the item is
+    /// gone from the world and marked delivered forever.</para>
+    ///
+    /// <para>The giftbox is append-only and never pruned, which is what makes
+    /// the replay possible at all: the entries are still there to re-read.
+    /// The in-memory dedupe is cleared with the watermark, since it is only
+    /// ever a cache of it.</para>
+    /// </summary>
+    public static void RewindConsumedWatermark(
+        IArchipelagoSession session, int localSlot, string? snapshot)
+    {
+        if (string.IsNullOrEmpty(snapshot))
+            return;
+
+        JObject stored;
+        try
+        {
+            stored = JObject.Parse(snapshot);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"The checkpoint's gift watermark could not be read ({exception.Message}); " +
+                "gifts delivered after it will not be re-offered.");
+            return;
+        }
+
+        ConsumedBySender.Clear();
+        if (stored[ConsumedSendersField] is JObject senders)
+        {
+            foreach (JProperty property in senders.Properties())
+                ConsumedBySender[property.Name] = property.Value.Value<long>();
+        }
+        _confirmedMailboxAck = stored.Value<long?>(ConsumedAckField) ?? 0;
+        // Everything downstream of the watermark is a cache of it, and a
+        // restore invalidates all of it: the dedupe set, the gift the previous
+        // run had in flight, and any ack it had not attributed yet.
+        DeliveredGiftKeys.Clear();
+        _inFlightGiftKey = null;
+        _inFlightGift = null;
+        _inFlightSequence = 0;
+        _unattributedAck = null;
+        _queuedAtHead = null;
+        _lastDeferredMessage = null;
+        // Claim the session so the next poll does not read the server copy
+        // back over this, then write the rewound watermark out as the truth.
+        _watermarkSession = session;
+        PersistConsumed(session, localSlot, (uint)_confirmedMailboxAck);
+        Console.WriteLine(
+            "Gift delivery rewound to the restored checkpoint; anything gifted to you after " +
+            "it will be offered again.");
     }
 
     private static void DeferOnce(string message)

@@ -43,7 +43,7 @@ class TestTrapPool(AzureDreamsTestBase):
     options = {"traps": True, "trap_chance": 60}
 
     def test_traps_replace_filler_without_changing_the_pool_size(self) -> None:
-        self.assertEqual(len(self.multiworld.itempool), 98)
+        self.assertEqual(len(self.multiworld.itempool), 137)
         traps = [
             item for item in self.multiworld.itempool if items.is_trap_name(item.name)
         ]
@@ -146,7 +146,7 @@ class TestTrapPlacement(unittest.TestCase):
 
     def test_slot_data_maps_every_trap_and_gates_the_client(self) -> None:
         slot_data = self.mine.fill_slot_data()
-        self.assertEqual(slot_data["apworld_version"], 16)
+        self.assertEqual(slot_data["apworld_version"], 19)
         trap_map = slot_data["trap_locations"]
         placed = self._trap_locations()
         self.assertEqual(len(trap_map), len(placed))

@@ -37,18 +37,53 @@ internal static class AzureDreamsReceiveState
     // must track patch.py's SEED_VERSION.
     public const ushort SeedVersion = 3;
 
-    public const uint PersistentStateAddress = 0x8001_5fc0;
+    // ADSV v4 (2026-08-15, the third floor check). Must match patch.py's
+    // PERSISTENT_* constants; docs/systems/third-floor-check.md §2 owns the
+    // table. The record's END is fixed at 0x8001_5FEC (the shortcut carrier
+    // and the send-token pair sit above it), so growth moves the BASE down.
+    //
+    //   +0x00 magic           +0x04 version:size (u16 lo / u16 hi)
+    //   +0x08 seed signature  +0x10 tower journal, 40 B: byte = floor-1, bit = slot
+    //   +0x38 town journal, 16 B packed (the shop's 20 checks are its first word)
+    //   +0x48 received count  +0x4C keycard level    +0x50 gold granted
+    //   +0x54 intro-restore marker (byte)  +0x55 first-run ready (byte)
+    //   +0x56 weapon temper level (byte)   +0x57 shield temper level (byte)
+    //
+    // 3 (2026-08-05): the gold-granted counter. Eager gold granting needs a
+    // durable count of packages already banked - gold is cumulative and cannot
+    // be re-derived from the history the way a keycard level can.
+    // 4: the tower journal is ONE BYTE PER FLOOR, not a packed bit array. Every
+    // reader that maps a location index to a mask position goes through
+    // TryGetTowerMaskPosition; nothing computes `index >> 3` any more.
+    public const uint PersistentStateAddress = 0x8001_5f94;
     public const uint PersistentStateMagic = 0x5653_4441; // "ADSV"
-    // 3 (2026-08-05): the gold-granted counter at +0x28. Eager gold granting
-    // needs a durable count of packages already banked - gold is cumulative
-    // and cannot be re-derived from the history the way a keycard level can.
-    public const ushort PersistentStateVersion = 3;
-    public const ushort PersistentStateSize = 0x2c;
+    public const ushort PersistentStateVersion = 4;
+    public const ushort PersistentStateSize = 0x58;
     public const int PersistentLocationMaskOffset = 0x10;
-    public const int ReceivedItemCountOffset = 0x1c;
-    public const int KeycardLevelOffset = 0x20;
-    public const int PersistentShopMaskOffset = 0x24;
-    public const int GoldGrantedCountOffset = 0x28;
+    public const int TowerJournalSize = 40;              // 39 floors + one spare byte
+    public const int PersistentShopMaskOffset = PersistentLocationMaskOffset + TowerJournalSize; // 0x38
+    public const int TownJournalSize = 16;
+    public const int ReceivedItemCountOffset = 0x48;
+    public const int KeycardLevelOffset = 0x4c;
+    public const int GoldGrantedCountOffset = 0x50;
+    public const int IntroRestoreMarkerOffset = 0x54;
+    public const int FirstRunReadyMarkerOffset = 0x55;
+    // The blacksmith's two temper levels (docs/systems/blacksmith.md): how far
+    // the equipment-shop smith may temper a weapon (swords, the Trained Wand)
+    // and a shield - 0..3 -> +0/+10/+20/+40. Set by the client from the
+    // received-item history like the keycard level: one Red Sand = one weapon
+    // level, one Blue Sand = one shield level; the sands never enter the bag.
+    public const int WeaponTemperLevelOffset = 0x56;
+    public const int ShieldTemperLevelOffset = 0x57;
+    // The ball charger's level (docs/systems/fortune-teller.md section 5): how
+    // many charges the fortune teller's neighbour may fill a spell ball up to
+    // - 0..3 -> 0/1/2/3 charges per town visit (the ceiling on one ball is ten
+    // at every level). One White Sand = one level, set from the history
+    // like the two temper levels. NOT inside ADSV (the record is full and
+    // growing it re-initializes every save): the word just below the base, in
+    // the free durable run, zeroed by both ADSV initializers. Byte 0 is the
+    // level. Must match patch.BALL_CHARGE_LEVEL_ADDRESS.
+    public const uint BallChargeLevelAddress = PersistentStateAddress - 4;
 
     // Send tokens. One tower send costs one; the game spends them, so the
     // count is a live game counter, not a client mirror.
@@ -83,12 +118,50 @@ internal static class AzureDreamsReceiveState
     public const uint SendTokenBankedAddress = 0x8001_5ff8;
 
     public const long LocationIdBase = 0x0AD1_0000;
-    public const int LocationCount = 78;
+    // Tower checks: 39 floors x 3 slots. Location id = base + (floor-1)*3 + slot;
+    // journal position = byte (floor-1), bit slot. Slots 0 and 1 lie on the
+    // floor; slot 2 is carried by that floor's forced monster spawn.
+    public const int TowerFloorCount = 39;
+    public const int SlotsPerFloor = 3;
+    public const int LocationCount = TowerFloorCount * SlotsPerFloor; // 117
     public const long ShopLocationIdBase = LocationIdBase + 0x100;
     public const int ShopLocationCount = 20;
-    public const int LocationMaskSize = (LocationCount + 7) / 8;
+    /// <summary>The tower journal as read from ADSV: one byte per floor.</summary>
+    public const int LocationMaskSize = TowerJournalSize;
     public const int ShopLocationMaskSize = sizeof(uint);
     public const byte MaximumKeycardLevel = 8;
+    public const byte MaximumTemperLevel = 3;
+
+    /// <summary>
+    /// Map a tower location index (0..LocationCount-1) to its journal byte
+    /// and bit. False for anything outside the tower's range.
+    /// </summary>
+    public static bool TryGetTowerMaskPosition(long index, out int byteIndex, out byte bit)
+    {
+        byteIndex = 0;
+        bit = 0;
+        if (index < 0 || index >= LocationCount)
+            return false;
+        byteIndex = (int)(index / SlotsPerFloor);
+        bit = (byte)(1 << (int)(index % SlotsPerFloor));
+        return true;
+    }
+
+    /// <summary>
+    /// Clear what the game never sets: bits at or above the slot count in
+    /// every floor byte, and the spare byte after floor 39. Read-side hygiene
+    /// only - the write side ORs into what the game wrote.
+    /// </summary>
+    public static void NormalizeTowerMask(Span<byte> mask)
+    {
+        if (mask.Length != LocationMaskSize)
+            throw new ArgumentException($"Location mask must be {LocationMaskSize} bytes.", nameof(mask));
+        const byte slotBits = (1 << SlotsPerFloor) - 1;
+        for (int floorIndex = 0; floorIndex < TowerFloorCount; floorIndex++)
+            mask[floorIndex] &= slotBits;
+        for (int spare = TowerFloorCount; spare < LocationMaskSize; spare++)
+            mask[spare] = 0;
+    }
 
     public static bool TryReadIdentity(
         IEmulatorMemory memory,
@@ -223,16 +296,17 @@ internal static class AzureDreamsReceiveState
             return true;
         }
 
+        // Everything after the signature: both journals and the three
+        // counters. The intro flags at +0x54/+0x55 are deliberately NOT part
+        // of this - they are the handshake this answer feeds.
         pristine =
             BinaryPrimitives.ReadUInt32LittleEndian(
                 state[ReceivedItemCountOffset..]) == 0 &&
             BinaryPrimitives.ReadUInt32LittleEndian(
-                state[PersistentShopMaskOffset..]) == 0 &&
-            BinaryPrimitives.ReadUInt32LittleEndian(
                 state[KeycardLevelOffset..]) == 0 &&
             BinaryPrimitives.ReadUInt32LittleEndian(
                 state[GoldGrantedCountOffset..]) == 0 &&
-            !state.Slice(PersistentLocationMaskOffset, LocationMaskSize)
+            !state.Slice(PersistentLocationMaskOffset, TowerJournalSize + TownJournalSize)
                 .ContainsAnyExcept((byte)0);
         message = string.Empty;
         return true;
@@ -341,7 +415,7 @@ internal static class AzureDreamsReceiveState
 
     /// <summary>
     /// The durable count of 5000-gold packages this save has banked, at
-    /// ADSV +0x28. Compared against the count in the server history every
+    /// ADSV GoldGrantedCountOffset. Compared against the count in the server history every
     /// poll, the same shape as the keycard level - which is what lets gold
     /// cut the delivery line. It rolls back with the gold counter and the
     /// cursor on a checkpoint restore, so the three can never disagree.
@@ -594,7 +668,7 @@ internal static class AzureDreamsReceiveState
             return false;
         }
 
-        mask[^1] &= 0x3f;
+        NormalizeTowerMask(mask);
         message = string.Empty;
         return true;
     }
@@ -612,12 +686,8 @@ internal static class AzureDreamsReceiveState
 
         foreach (long locationId in checkedLocations)
         {
-            long index = locationId - LocationIdBase;
-            if (index < 0 || index >= LocationCount)
+            if (!TryGetTowerMaskPosition(locationId - LocationIdBase, out int byteIndex, out byte bit))
                 continue;
-
-            int byteIndex = (int)index >> 3;
-            byte bit = (byte)(1 << ((int)index & 7));
             if ((mask[byteIndex] & bit) != 0)
                 continue;
 
@@ -631,25 +701,15 @@ internal static class AzureDreamsReceiveState
             return true;
         }
 
+        // The journal is the only copy. The tower mailbox used to carry a
+        // 16-byte "collected request mirror" at +0x90 that this also
+        // refreshed; no game code ever read it (the spawner and the collect
+        // hook read ADSV directly), and the 40-byte v4 journal would not fit
+        // in it, so it is retired.
         uint stateMaskAddress = PersistentStateAddress + PersistentLocationMaskOffset;
         if (!memory.TryWrite(stateMaskAddress, mask, out string? error))
         {
             message = error ?? "Could not merge server checks into persistent game state.";
-            return false;
-        }
-
-        // The high mailbox is tower-only; this address is live stack in town.
-        // Floor spawning reads the persistent mask directly, so the mirror is
-        // optional and is refreshed only when its header proves it is loaded.
-        if (!AzureDreamsMailbox.TryDetect(memory, out bool towerMailboxDetected, out message))
-            return false;
-        if (towerMailboxDetected &&
-            !memory.TryWrite(
-                AzureDreamsMailbox.Address + AzureDreamsMailbox.CollectedFloorLocationRequestsOffset,
-                mask,
-                out error))
-        {
-            message = error ?? "Persistent checks were updated, but the mailbox mirror could not be updated.";
             return false;
         }
 
@@ -664,6 +724,55 @@ internal static class AzureDreamsReceiveState
         return true;
     }
 
+    /// <summary>
+    /// Merge server-confirmed checks into an ADSV record held in a buffer -
+    /// both journals - and return how many bits were newly set. This is the
+    /// same merge <see cref="TryMergeCheckedLocations"/> performs on live
+    /// memory, applied to a checkpoint payload BEFORE it is written back:
+    /// a tower resume rebuilds the restored floor the moment the angel hands
+    /// over, and the spawner reads the journal at that build, so a merge that
+    /// only lands on a later poll is too late - every marker collected on that
+    /// floor since its entry checkpoint respawns (ride 2, 2026-08-15).
+    /// </summary>
+    public static int MergeCheckedLocationsIntoState(
+        Span<byte> state,
+        IEnumerable<long> checkedLocations)
+    {
+        if (state.Length < PersistentStateSize)
+            throw new ArgumentException($"ADSV state must be {PersistentStateSize} bytes.", nameof(state));
+        if (BinaryPrimitives.ReadUInt32LittleEndian(state) != PersistentStateMagic)
+            return 0;
+
+        Span<byte> tower = state.Slice(PersistentLocationMaskOffset, LocationMaskSize);
+        Span<byte> shop = state.Slice(PersistentShopMaskOffset, ShopLocationMaskSize);
+        uint shopBits = BinaryPrimitives.ReadUInt32LittleEndian(shop);
+        int newlyRecorded = 0;
+        foreach (long locationId in checkedLocations)
+        {
+            if (TryGetTowerMaskPosition(locationId - LocationIdBase, out int byteIndex, out byte bit))
+            {
+                if ((tower[byteIndex] & bit) == 0)
+                {
+                    tower[byteIndex] |= bit;
+                    newlyRecorded++;
+                }
+                continue;
+            }
+            long shopIndex = locationId - ShopLocationIdBase;
+            if (shopIndex >= 0 && shopIndex < ShopLocationCount)
+            {
+                uint shopBit = 1u << (int)shopIndex;
+                if ((shopBits & shopBit) == 0)
+                {
+                    shopBits |= shopBit;
+                    newlyRecorded++;
+                }
+            }
+        }
+        BinaryPrimitives.WriteUInt32LittleEndian(shop, shopBits);
+        return newlyRecorded;
+    }
+
     public static long[] GetCollectedLocationIds(ReadOnlySpan<byte> mask)
     {
         if (mask.Length != LocationMaskSize)
@@ -672,7 +781,8 @@ internal static class AzureDreamsReceiveState
         List<long> locations = [];
         for (int index = 0; index < LocationCount; index++)
         {
-            if ((mask[index >> 3] & (1 << (index & 7))) != 0)
+            TryGetTowerMaskPosition(index, out int byteIndex, out byte bit);
+            if ((mask[byteIndex] & bit) != 0)
                 locations.Add(LocationIdBase + index);
         }
         return locations.ToArray();
@@ -850,6 +960,128 @@ internal static class AzureDreamsReceiveState
         }
 
         message = $"Progressive Keycard level is {level}.";
+        return true;
+    }
+
+    /// <summary>
+    /// The blacksmith's two temper levels, straight from their ADSV bytes.
+    /// </summary>
+    public static bool TryReadTemperLevels(
+        IEmulatorMemory memory,
+        out byte weaponLevel,
+        out byte shieldLevel,
+        out string message)
+    {
+        weaponLevel = 0;
+        shieldLevel = 0;
+        if (!TryReadPersistentIdentity(memory, out _, out message))
+            return false;
+
+        Span<byte> levels = stackalloc byte[2];
+        if (!memory.TryRead(PersistentStateAddress + WeaponTemperLevelOffset, levels, out string? error))
+        {
+            message = error ?? "Could not read the temper levels.";
+            return false;
+        }
+        if (levels[0] > MaximumTemperLevel || levels[1] > MaximumTemperLevel)
+        {
+            message = $"The saved temper levels {levels[0]}/{levels[1]} exceed the maximum {MaximumTemperLevel}.";
+            return false;
+        }
+        weaponLevel = levels[0];
+        shieldLevel = levels[1];
+        message = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// Writes both temper level bytes (they share one word with the intro
+    /// flags, so this writes exactly the two bytes) and reads them back.
+    /// </summary>
+    public static bool TrySetTemperLevels(
+        IEmulatorMemory memory,
+        byte weaponLevel,
+        byte shieldLevel,
+        out string message)
+    {
+        if (weaponLevel > MaximumTemperLevel || shieldLevel > MaximumTemperLevel)
+        {
+            message = $"Temper levels must be between 0 and {MaximumTemperLevel}.";
+            return false;
+        }
+        if (!TryReadPersistentIdentity(memory, out _, out message))
+            return false;
+
+        byte[] levels = [weaponLevel, shieldLevel];
+        uint address = PersistentStateAddress + WeaponTemperLevelOffset;
+        if (!memory.TryWrite(address, levels, out string? error))
+        {
+            message = error ?? "Could not save the temper levels.";
+            return false;
+        }
+        Span<byte> observed = stackalloc byte[2];
+        if (!memory.TryRead(address, observed, out error) || !observed.SequenceEqual(levels))
+        {
+            message = error ?? "The temper levels did not match on read-back.";
+            return false;
+        }
+        message = $"Temper levels are weapon {weaponLevel}, shield {shieldLevel}.";
+        return true;
+    }
+
+    /// <summary>The ball charger's level, the byte beside ADSV.</summary>
+    public static bool TryReadBallChargeLevel(
+        IEmulatorMemory memory,
+        out byte level,
+        out string message)
+    {
+        level = 0;
+        if (!TryReadPersistentIdentity(memory, out _, out message))
+            return false;
+
+        Span<byte> value = stackalloc byte[1];
+        if (!memory.TryRead(BallChargeLevelAddress, value, out string? error))
+        {
+            message = error ?? "Could not read the ball charge level.";
+            return false;
+        }
+        if (value[0] > MaximumTemperLevel)
+        {
+            message = $"The saved ball charge level {value[0]} exceeds the maximum {MaximumTemperLevel}.";
+            return false;
+        }
+        level = value[0];
+        message = string.Empty;
+        return true;
+    }
+
+    /// <summary>Writes the ball charge level byte and reads it back.</summary>
+    public static bool TrySetBallChargeLevel(
+        IEmulatorMemory memory,
+        byte level,
+        out string message)
+    {
+        if (level > MaximumTemperLevel)
+        {
+            message = $"The ball charge level must be between 0 and {MaximumTemperLevel}.";
+            return false;
+        }
+        if (!TryReadPersistentIdentity(memory, out _, out message))
+            return false;
+
+        byte[] value = [level];
+        if (!memory.TryWrite(BallChargeLevelAddress, value, out string? error))
+        {
+            message = error ?? "Could not save the ball charge level.";
+            return false;
+        }
+        Span<byte> observed = stackalloc byte[1];
+        if (!memory.TryRead(BallChargeLevelAddress, observed, out error) || observed[0] != level)
+        {
+            message = error ?? "The ball charge level did not match on read-back.";
+            return false;
+        }
+        message = $"Ball charge level is {level}.";
         return true;
     }
 

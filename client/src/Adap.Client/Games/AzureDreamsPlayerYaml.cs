@@ -32,6 +32,10 @@ internal static class AzureDreamsPlayerYaml
     /// is a whole tower check spent on a setback, and they compound.
     /// </summary>
     public const int DefaultTrapChance = 3;
+    /// <summary>The APWorld's `HintSystem` / `TemperSystem` toggles, both on by default.</summary>
+    public const bool DefaultHintSystem = true;
+    public const bool DefaultTemperSystem = true;
+    public const bool DefaultCarrierSystem = true;
 
     /// <summary>
     /// Archipelago's own `ProgressionBalancing` is a NamedRange 0-99
@@ -125,7 +129,10 @@ internal static class AzureDreamsPlayerYaml
         string slotName,
         bool traps,
         int trapChance,
-        int progressionBalancing)
+        int progressionBalancing,
+        bool hintSystem = true,
+        bool temperSystem = true,
+        bool carrierSystem = true)
     {
         if (!TryValidateSlotName(slotName, out string validated, out string message))
             throw new ArgumentException(message, nameof(slotName));
@@ -151,6 +158,15 @@ internal static class AzureDreamsPlayerYaml
         text.Append($"  traps: {(traps ? "true" : "false")}\n");
         text.Append("  # Percent chance for each ordinary item to be a trap instead.\n");
         text.Append($"  trap_chance: {ClampTrapChance(trapChance)}\n");
+        text.Append("  # The fortune teller reads a tower floor's un-collected checks for\n");
+        text.Append("  # gold - by kind, in her own vague terms.\n");
+        text.Append($"  hint_system: {(hintSystem ? "true" : "false")}\n");
+        text.Append("  # The blacksmith and the ball charger, unlocked by the Red, Blue and\n");
+        text.Append("  # White Sands in the pool. Off: no NPCs, no sands, vanilla sand drops.\n");
+        text.Append($"  temper_system: {(temperSystem ? "true" : "false")}\n");
+        text.Append("  # A third check on every tower floor, carried by a monster that does\n");
+        text.Append("  # not belong there. Off: two checks a floor and vanilla rosters.\n");
+        text.Append($"  carrier_system: {(carrierSystem ? "true" : "false")}\n");
         return text.ToString();
     }
 }

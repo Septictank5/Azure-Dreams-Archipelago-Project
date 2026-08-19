@@ -17,8 +17,14 @@ SHOP_SLOTS_PER_BUILDING = 10
 SHOP_NAMES = ("Equipment Shop", "Monster Shop")
 SHOP_LOCATION_COUNT = len(SHOP_NAMES) * SHOP_SLOTS_PER_BUILDING
 TOWER_FLOOR_COUNT = 39
-TOWER_SLOTS_PER_FLOOR = 2
+TOWER_SLOTS_PER_FLOOR = 3
 TOWER_LOCATION_COUNT = TOWER_FLOOR_COUNT * TOWER_SLOTS_PER_FLOOR
+# Slot 2 is the monster-carried check. With `carrier_system` off it is not a
+# location at all, but its ID and its name stay reserved - the ids are the
+# game's own journal bit index, and re-numbering them per option would make
+# two rooms of the same seed disagree about what a location id means.
+TOWER_CARRIER_SLOT = 2
+TOWER_GROUND_SLOTS_PER_FLOOR = TOWER_CARRIER_SLOT
 ULTIMATE_EGG_LOCATION = "Ultimate Egg Acquired"
 
 
@@ -65,6 +71,16 @@ class AzureDreamsLocation(Location):
     game = GAME_NAME
 
 
+def tower_slots_for(world: AzureDreamsWorld) -> int:
+    """How many of each floor's three slots this world actually places."""
+
+    return (
+        TOWER_SLOTS_PER_FLOOR
+        if world.options.carrier_system
+        else TOWER_GROUND_SLOTS_PER_FLOOR
+    )
+
+
 def create_all_locations(world: AzureDreamsWorld) -> None:
     town = world.get_region(regions.TOWN_REGION)
     town.add_locations(
@@ -75,12 +91,13 @@ def create_all_locations(world: AzureDreamsWorld) -> None:
         AzureDreamsLocation,
     )
 
+    slots = tower_slots_for(world)
     for floor in range(1, TOWER_FLOOR_COUNT + 1):
         region = world.get_region(regions.tower_region_name(floor))
         region.add_locations(
             {
                 tower_location_name(floor, slot): tower_location_id(floor, slot)
-                for slot in range(TOWER_SLOTS_PER_FLOOR)
+                for slot in range(slots)
             },
             AzureDreamsLocation,
         )

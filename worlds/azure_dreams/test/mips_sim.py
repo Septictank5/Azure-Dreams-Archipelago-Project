@@ -164,6 +164,8 @@ class Cpu:
                 write(rd, source & target)
             elif function == 0x25:  # or
                 write(rd, source | target)
+            elif function == 0x26:  # xor
+                write(rd, source ^ target)
             elif function == 0x2A:  # slt
                 write(rd, 1 if _as_signed(source) < _as_signed(target) else 0)
             elif function == 0x2B:  # sltu
@@ -188,6 +190,10 @@ class Cpu:
             return None, (pc + 4 + _signed(immediate) * 4) if source == target else None
         if opcode == 0x05:  # bne
             return None, (pc + 4 + _signed(immediate) * 4) if source != target else None
+        if opcode == 0x06:  # blez
+            return None, (pc + 4 + _signed(immediate) * 4) if _as_signed(source) <= 0 else None
+        if opcode == 0x07:  # bgtz
+            return None, (pc + 4 + _signed(immediate) * 4) if _as_signed(source) > 0 else None
         if opcode == 0x09:  # addiu
             write(rt, source + _signed(immediate))
             return None, None

@@ -49,7 +49,9 @@ internal static class Program
 
         // A single existing-file argument is a double-clicked patch: the shell
         // passes exactly this when the patch association fires. Open the
-        // window with that patch already loaded and start the game.
+        // window with that patch already loaded and its disc built. It
+        // deliberately does NOT start the game - the room is meant to be
+        // connected first, and Launch Game is what starts it.
         if (args.Length == 1 &&
             !args[0].StartsWith("--", StringComparison.Ordinal) &&
             File.Exists(args[0]))
@@ -96,22 +98,47 @@ internal static class Program
             }
         }
 
-        // Draws the main window to a PNG with a session staged, so a layout
-        // change can be LOOKED at without a room, a game or a screenshot from
-        // the player. Every UI mistake worth catching here was one that read
-        // fine in the source and wrong on screen.
+        // Draws a window to a PNG, so a layout change can be LOOKED at without
+        // a room, a game or a screenshot from the player. Every UI mistake
+        // worth catching here was one that read fine in the source and wrong
+        // on screen.
+        //
+        //   --render-window out.png [w h]
+        //   --render-tracker out.png [live|drained] [w h]
         if (args.Length >= 2 &&
             args[0].Equals("--render-window", StringComparison.OrdinalIgnoreCase))
         {
             ApplicationConfiguration.Initialize();
-            bool compact = args.Length > 2 &&
-                args[2].Equals("compact", StringComparison.OrdinalIgnoreCase);
-            // Optional size, clamped up to the mode's own minimum: pass 1 1 to
-            // render whatever the smallest allowed window actually looks like.
+            int.TryParse(args.Length > 2 ? args[2] : null, out int width);
+            int.TryParse(args.Length > 3 ? args[3] : null, out int height);
+            return ConnectionWindow.RenderToFile(Path.GetFullPath(args[1]), width, height);
+        }
+
+        if (args.Length >= 2 &&
+            args[0].Equals("--render-tracker", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplicationConfiguration.Initialize();
+            // Drained is what a player sees before the game is connected, so
+            // it is a state the layout has to be reviewed in as well.
+            bool live = args.Length <= 2 ||
+                !args[2].Equals("drained", StringComparison.OrdinalIgnoreCase);
+            // Optional size, clamped up to the tracker's own minimum: pass 1 1
+            // to render whatever the smallest allowed window looks like.
             int.TryParse(args.Length > 3 ? args[3] : null, out int width);
             int.TryParse(args.Length > 4 ? args[4] : null, out int height);
-            return ConnectionWindow.RenderToFile(
-                Path.GetFullPath(args[1]), compact, width, height);
+            return ConnectionWindow.RenderTrackerToFile(
+                Path.GetFullPath(args[1]), live, width, height);
+        }
+
+        // The Create YAML dialog, the same way: `--render-yaml out.png [slot] [w h]`.
+        if (args.Length >= 2 &&
+            args[0].Equals("--render-yaml", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplicationConfiguration.Initialize();
+            int.TryParse(args.Length > 3 ? args[3] : null, out int width);
+            int.TryParse(args.Length > 4 ? args[4] : null, out int height);
+            return CreateYamlDialog.RenderToFile(
+                Path.GetFullPath(args[1]), args.Length > 2 ? args[2] : string.Empty, width, height);
         }
 
         if (args.Length == 3 &&

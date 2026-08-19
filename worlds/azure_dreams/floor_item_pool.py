@@ -129,14 +129,25 @@ SPAWN_FLAG_EDITS: tuple[SpawnFlagEdit, ...] = (
         "version, stays excluded). Class 3 alongside Dark/Holy. Bit 0x200 "
         "is unattributed and preserved.",
     ),
-    # --- class shifts of already-spawnable items ---
+    # --- removed from the floors (bit 0x10 set) ---
     SpawnFlagEdit(
-        "Red Sand", 0x0A, 1, 0x800733D8, 0x1008, 0x0008,
-        "Commodity consumable; class 1 -> 0.",
+        "Red Sand", 0x0A, 1, 0x800733D8, 0x1008, 0x1018,
+        "2026-08-16: the sands are the blacksmith's progressive unlocks now "
+        "(three Red, three Blue in the Archipelago pool; each raises his weapon / "
+        "shield temper level and never enters the bag), so the floors stop "
+        "dropping them. Was class 1 -> 0 as a commodity consumable.",
     ),
     SpawnFlagEdit(
-        "Blue Sand", 0x0A, 2, 0x800733EC, 0x1008, 0x0008,
-        "Commodity consumable; class 1 -> 0.",
+        "Blue Sand", 0x0A, 2, 0x800733EC, 0x1008, 0x1018,
+        "Same as Red Sand.",
+    ),
+    SpawnFlagEdit(
+        "White Sand", 0x0A, 3, 0x80073400, 0x1808, 0x1818,
+        "2026-08-16: the ball charger's progressive unlock (three in the pool, "
+        "each raises the charger's per-visit allowance to 1/2/3 charges "
+        "and never enters the bag - "
+        "docs/systems/fortune-teller.md section 5), so the floors stop dropping "
+        "the free version. Class 1 kept; bit 0x800 is unattributed and preserved.",
     ),
     SpawnFlagEdit(
         "Laev Fruit", 0x02, 6, 0x80072F78, 0x1008, 0x2008,
@@ -235,8 +246,14 @@ def _assert_layout() -> None:
 _assert_layout()
 
 
-def iter_spawn_flag_file_patches() -> tuple[tuple[int, bytes], ...]:
-    """(SLUS_006.14 file offset, halfword) per flag edit."""
+# The three sands' never-spawn edits belong to the temper system (blacksmith +
+# ball charger); with that option off the floors drop them as in vanilla.
+TEMPER_SYSTEM_EDIT_NAMES = frozenset({"Red Sand", "Blue Sand", "White Sand"})
+
+
+def iter_spawn_flag_file_patches(temper_system: bool = True) -> tuple[tuple[int, bytes], ...]:
+    """(SLUS_006.14 file offset, halfword) per flag edit; the sand edits only
+    while the temper system (their NPCs) is on."""
 
     return tuple(
         (
@@ -246,6 +263,7 @@ def iter_spawn_flag_file_patches() -> tuple[tuple[int, bytes], ...]:
             struct.pack("<H", edit.replacement),
         )
         for edit in SPAWN_FLAG_EDITS
+        if temper_system or edit.name not in TEMPER_SYSTEM_EDIT_NAMES
     )
 
 
@@ -282,11 +300,11 @@ def _iter_mode2_raw_patches(
     return tuple(result)
 
 
-def iter_floor_item_pool_raw_patches() -> tuple[tuple[int, bytes], ...]:
+def iter_floor_item_pool_raw_patches(temper_system: bool = True) -> tuple[tuple[int, bytes], ...]:
     return (
         *_iter_mode2_raw_patches(
             save_removal.SLUS_FILE_START_LBA,
-            iter_spawn_flag_file_patches(),
+            iter_spawn_flag_file_patches(temper_system),
         ),
         *_iter_mode2_raw_patches(
             save_removal.DUNGEON_FILE_START_LBA,
@@ -295,7 +313,7 @@ def iter_floor_item_pool_raw_patches() -> tuple[tuple[int, bytes], ...]:
     )
 
 
-def append_floor_item_pool_ppf_records(ppf: bytearray) -> None:
-    for raw_offset, data in iter_floor_item_pool_raw_patches():
+def append_floor_item_pool_ppf_records(ppf: bytearray, temper_system: bool = True) -> None:
+    for raw_offset, data in iter_floor_item_pool_raw_patches(temper_system):
         ppf.extend(struct.pack("<IB", raw_offset, len(data)))
         ppf.extend(data)

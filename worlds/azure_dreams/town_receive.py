@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import struct
 
-from . import town_shop
+from . import patch, town_shop
 
 
 TOWN_RECEIVE_REGION_START_OFFSET = town_shop.SHOP_DATA_END_OFFSET
@@ -150,7 +150,16 @@ DELIVER_END_OFFSET = town_shop.SHOP_CORE_SIZE
 # prove the build actually erased them rather than leaving something that
 # looks live. (0xD40..0xD80 is the tail of the routine span above it.)
 FREE_SLAB_SPANS = (
-    (0x3F0, 0x420, "retired receive movement-stop check"),
+    # 0x3F0..0x420, the retired receive movement-stop check, was claimed by
+    # town_shop's INTRO-STATE TABLE on 2026-08-15. **This one had already been
+    # claimed by accident**: the table sits at 0x3E0 and declared its end as
+    # DESCRIPTION_RESOLVER_OFFSET (0x420), so the two overlapped and the erase
+    # below - which runs AFTER the shop payload is built - silently truncated
+    # the table to its first two entries. That was invisible for a year
+    # because the table only had two entries and its zero terminator landed in
+    # already-zero bytes. Adding a third write is what exposed it. The span is
+    # genuinely free, so the fix is to hand it over rather than move the table;
+    # `test_town_receive.py` now proves no town_shop region overlaps this tuple.
     # 0xA00..0xA40, the retired movement-stop body, was claimed by
     # town_shop's send-menu capacity gate on 2026-08-05 - exactly the
     # "declared so the next feature can claim them" handover this tuple
@@ -181,19 +190,24 @@ INTRO_CAPTURE_WRAPPER_ADDRESS = (
     town_shop.SHOP_CORE_ADDRESS + INTRO_CAPTURE_WRAPPER_OFFSET
 )
 INTRO_RESTORE_STATE_ADDRESS = MAILBOX_ADDRESS + INTRO_RESTORE_STATE_OFFSET
+# The two intro-handshake bytes are ADSV fields (v4 gave them a word of their
+# own at +0x54; they used to squat in the old 10-byte mask's slack at
+# +0x1A/+0x1B, which the 40-byte journal now covers). patch.py owns the offsets.
 INTRO_RESTORE_MARKER_ADDRESS = (
-    town_shop.PERSISTENT_STATE_ADDRESS + 0x1A
+    patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_INTRO_RESTORE_MARKER_OFFSET
 )
 INTRO_RESTORE_MARKER_VALUE = 1
 INTRO_FIRST_RUN_READY_ADDRESS = (
-    town_shop.PERSISTENT_STATE_ADDRESS + 0x1B
+    patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_INTRO_FIRST_RUN_READY_OFFSET
 )
 INTRO_FIRST_RUN_READY_VALUE = 1
 ORIGINAL_HOUSE_PITA_FNO_ADDRESS = 0x800C_8120
 
 INVENTORY_POINTERS_ADDRESS = 0x8001_029C
 SAFE_DESCRIPTORS_ADDRESS = 0x8001_1F80
-PERSISTENT_RECEIVED_COUNT_ADDRESS = 0x8001_5FDC
+PERSISTENT_RECEIVED_COUNT_ADDRESS = (
+    patch.PERSISTENT_STATE_ADDRESS + patch.PERSISTENT_RECEIVED_ITEM_COUNT_OFFSET
+)
 
 TOWN_MODAL_STATE_ADDRESS = 0x8008_1EB0
 # Canonical in town_shop: the door freeze service polls the same root.
